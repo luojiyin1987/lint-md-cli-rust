@@ -158,12 +158,7 @@ fn write_fixed(source: &Source, fixed: &str) -> Result<(), String> {
     }
 }
 
-fn emit_text(
-    path: &str,
-    result: &LintResult,
-    fix: bool,
-    source: &Source,
-) -> Result<(), String> {
+fn emit_text(path: &str, result: &LintResult, fix: bool, source: &Source) -> Result<(), String> {
     if fix && matches!(source, Source::Stdin) {
         io::stdout()
             .write_all(result.fixed.as_bytes())
@@ -199,11 +194,7 @@ fn format_diagnostic(path: &str, diagnostic: &Diagnostic) -> String {
         diagnostic.severity,
         diagnostic.rule_id,
         diagnostic.message,
-        if diagnostic.fixable {
-            " (fixable)"
-        } else {
-            ""
-        }
+        if diagnostic.fixable { " (fixable)" } else { "" }
     )
 }
 
