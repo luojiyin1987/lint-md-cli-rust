@@ -1,11 +1,19 @@
-import * as coreModule from "@lint-md/core";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const core = coreModule.default ?? coreModule;
-const lintMarkdown = coreModule.lintMarkdown ?? core.lintMarkdown;
-const fixMarkdown = coreModule.fixMarkdown ?? core.fixMarkdown;
+const compatDir = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const corePath =
+  process.env.LINT_MD_CORE_REFERENCE ||
+  join(compatDir, "core-reference", "lib", "index.js");
+const core = require(corePath);
+const { lintMarkdown, fixMarkdown } = core;
 
 if (typeof lintMarkdown !== "function" || typeof fixMarkdown !== "function") {
-  throw new Error("@lint-md/core does not expose lintMarkdown and fixMarkdown");
+  throw new Error(
+    `TypeScript reference at ${corePath} does not expose lintMarkdown and fixMarkdown`
+  );
 }
 
 const ALL_RULES = [
