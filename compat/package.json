@@ -1,0 +1,11 @@
+{
+  "name": "lint-md-cli-rust-compat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node compare.mjs"
+  },
+  "dependencies": {
+    "@lint-md/core": "2.3.0"
+  }
+}
