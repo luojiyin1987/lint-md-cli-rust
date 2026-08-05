@@ -45,6 +45,7 @@ jobs:
           LINT_MD_BENCH_COMMAND_TIMEOUT_MS: 120000
         run: node bench/run.mjs
       - name: Upload benchmark report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lint-md-benchmark-${{ github.run_id }}
