@@ -180,11 +180,7 @@ fn blockquote_parts(line: &str) -> Option<(usize, &str)> {
         .map(|after_marker| (prefix, after_marker))
 }
 
-fn diagnose_empty_blockquote(
-    line: &str,
-    line_number: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn diagnose_empty_blockquote(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
     if let Some((marker_index, after_marker)) = blockquote_parts(line) {
         if after_marker.trim().is_empty() {
             diagnostics.push(Diagnostic {
@@ -199,11 +195,7 @@ fn diagnose_empty_blockquote(
     }
 }
 
-fn diagnose_blockquote_spacing(
-    line: &str,
-    line_number: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn diagnose_blockquote_spacing(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
     if let Some((marker_index, after_marker)) = blockquote_parts(line) {
         let spaces = after_marker.chars().take_while(|ch| *ch == ' ').count();
         if spaces > 1 {
@@ -228,11 +220,7 @@ fn fix_blockquote_spacing(line: &str) -> String {
         return line.to_owned();
     }
 
-    let consumed_bytes: usize = after_marker
-        .chars()
-        .take(spaces)
-        .map(char::len_utf8)
-        .sum();
+    let consumed_bytes: usize = after_marker.chars().take(spaces).map(char::len_utf8).sum();
     let mut output = String::with_capacity(line.len() - consumed_bytes + 1);
     output.push_str(&line[..marker_index]);
     output.push('>');
@@ -241,11 +229,7 @@ fn fix_blockquote_spacing(line: &str) -> String {
     output
 }
 
-fn diagnose_empty_inline_code(
-    line: &str,
-    line_number: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn diagnose_empty_inline_code(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
     for byte_index in exact_double_backticks(line) {
         diagnostics.push(Diagnostic {
             rule_id: RULE_NO_EMPTY_INLINE_CODE,
@@ -294,11 +278,7 @@ fn fix_empty_inline_code(line: &str) -> String {
     output
 }
 
-fn diagnose_full_width_numbers(
-    line: &str,
-    line_number: usize,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn diagnose_full_width_numbers(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
     visit_text_characters(line, |byte_index, ch| {
         if is_full_width_digit(ch) {
             diagnostics.push(Diagnostic {
@@ -338,7 +318,10 @@ fn visit_text_characters(mut line: &str, mut visitor: impl FnMut(usize, char)) {
         let mut chars = line.char_indices();
         let (_, ch) = chars.next().expect("non-empty string has a character");
         if ch == '`' {
-            let run = line.chars().take_while(|candidate| *candidate == '`').count();
+            let run = line
+                .chars()
+                .take_while(|candidate| *candidate == '`')
+                .count();
             let run_bytes = run;
             match active_delimiter {
                 None => active_delimiter = Some(run),
