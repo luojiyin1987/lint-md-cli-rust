@@ -4,8 +4,5 @@
   "type": "module",
   "scripts": {
     "test": "node compare.mjs"
-  },
-  "dependencies": {
-    "@lint-md/core": "2.1.3"
   }
 }
