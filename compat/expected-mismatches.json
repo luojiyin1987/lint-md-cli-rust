@@ -1,16 +1,1 @@
-{
-  "no-empty-inline-code/exact": [
-    "diagnostic-count",
-    "fixability",
-    "fixed-output",
-    "locations",
-    "rule-ids"
-  ],
-  "no-empty-inline-code/whitespace": [
-    "diagnostic-count",
-    "fixability",
-    "fixed-output",
-    "locations",
-    "rule-ids"
-  ]
-}
+{}
