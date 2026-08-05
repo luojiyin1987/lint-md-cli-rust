@@ -31,7 +31,7 @@ jobs:
         run: cargo test --all-targets
 
   compatibility:
-    name: TypeScript–Rust differential harness
+    name: TypeScript–Rust differential and benchmark smoke
     runs-on: ubuntu-latest
 
     steps:
@@ -58,3 +58,10 @@ jobs:
         run: npm run build --prefix compat/core-reference
       - name: Compare implementations
         run: npm test --prefix compat
+      - name: Generate benchmark workloads
+        run: node bench/generate-workloads.mjs
+      - name: Smoke test benchmark harness
+        env:
+          LINT_MD_RS_BIN: ${{ github.workspace }}/target/debug/lint-md-rs
+          LINT_MD_CORE_REFERENCE: ${{ github.workspace }}/compat/core-reference/lib/index.js
+        run: node bench/run.mjs --smoke --output bench/results/ci-smoke.json --markdown bench/results/ci-smoke.md
