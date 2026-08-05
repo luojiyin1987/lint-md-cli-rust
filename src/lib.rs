@@ -125,9 +125,9 @@ fn mark_protected_lines(lines: &mut [SourceLine<'_>]) {
         let candidate = parse_fence(line.content.trim_start_matches([' ', '\t']));
         if let Some(current) = active_fence {
             line.protected = true;
-            if candidate.is_some_and(|fence| {
-                fence.marker == current.marker && fence.width >= current.width
-            }) {
+            if candidate
+                .is_some_and(|fence| fence.marker == current.marker && fence.width >= current.width)
+            {
                 active_fence = None;
             }
             continue;
@@ -281,9 +281,9 @@ fn fix_line_rules(input: &str, mut diagnostics: Option<&mut Vec<Diagnostic>>) ->
         if let Some(current) = active_fence {
             fixed.push_str(line.content);
             fixed.push_str(line.ending);
-            if candidate.is_some_and(|fence| {
-                fence.marker == current.marker && fence.width >= current.width
-            }) {
+            if candidate
+                .is_some_and(|fence| fence.marker == current.marker && fence.width >= current.width)
+            {
                 active_fence = None;
             }
             continue;
