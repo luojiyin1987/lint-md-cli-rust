@@ -29,3 +29,23 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --all-targets
+
+  compatibility:
+    name: TypeScript–Rust differential harness
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Select stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Build Rust reference binary
+        run: cargo build
+      - name: Install TypeScript reference
+        run: npm install --prefix compat --ignore-scripts --no-audit --no-fund
+      - name: Compare implementations
+        run: npm test --prefix compat
