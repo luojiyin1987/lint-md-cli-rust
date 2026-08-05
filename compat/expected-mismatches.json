@@ -1,1 +1,64 @@
-{}
+{
+  "no-full-width-number/basic": [
+    "diagnostic-count",
+    "fixability",
+    "locations",
+    "rule-ids"
+  ],
+  "no-empty-inline-code/exact": [
+    "diagnostic-count",
+    "fixability",
+    "fixed-output",
+    "locations",
+    "rule-ids"
+  ],
+  "no-empty-inline-code/whitespace": [
+    "diagnostic-count",
+    "fixability",
+    "fixed-output",
+    "locations",
+    "rule-ids"
+  ],
+  "no-empty-blockquote/empty": [
+    "exit-code",
+    "fixability",
+    "fixed-output"
+  ],
+  "no-multiple-space-blockquote/multiple": [
+    "locations"
+  ],
+  "no-multiple-space-blockquote/missing": [
+    "diagnostic-count",
+    "fixability",
+    "fixed-output",
+    "locations",
+    "rule-ids"
+  ],
+  "no-multiple-blank-lines/middle": [
+    "diagnostic-count",
+    "fixability",
+    "locations",
+    "rule-ids"
+  ],
+  "no-multiple-blank-lines/leading": [
+    "diagnostic-count",
+    "fixability",
+    "fixed-output",
+    "locations",
+    "rule-ids"
+  ],
+  "no-multiple-blank-lines/trailing": [
+    "diagnostic-count",
+    "fixability",
+    "fixed-output",
+    "locations",
+    "rule-ids"
+  ],
+  "no-multiple-blank-lines/whitespace-only": [
+    "diagnostic-count",
+    "fixability",
+    "fixed-output",
+    "locations",
+    "rule-ids"
+  ]
+}
