@@ -68,13 +68,15 @@ pub fn lint_markdown(input: &str) -> LintResult {
     let mut fixed = fix_line_rules(input, Some(&mut diagnostics));
     fixed = fix_blank_lines(&fixed);
 
-    for _ in 0..3 {
-        let mut next = fix_line_rules(&fixed, None);
-        next = fix_blank_lines(&next);
-        if next == fixed {
-            break;
+    if fixed != input {
+        for _ in 0..3 {
+            let mut next = fix_line_rules(&fixed, None);
+            next = fix_blank_lines(&next);
+            if next == fixed {
+                break;
+            }
+            fixed = next;
         }
-        fixed = next;
     }
 
     LintResult {
