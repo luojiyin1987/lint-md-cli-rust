@@ -42,20 +42,47 @@ function parseArguments(args) {
   return options;
 }
 
+function positiveIntegerEnvironment(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer, received: ${raw}`);
+  }
+  return value;
+}
+
 function commandOutput(executable, args) {
   const result = spawnSync(executable, args, { encoding: "utf8" });
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-function runCommand(command, repeats = 1) {
+function formatDuration(milliseconds) {
+  if (milliseconds < 1000) return `${milliseconds.toFixed(2)} ms`;
+  return `${(milliseconds / 1000).toFixed(2)} s`;
+}
+
+function runCommand(command, repeats, timeoutMs) {
   const started = performance.now();
   for (let index = 0; index < repeats; index += 1) {
     const result = spawnSync(command.executable, command.args, {
       env: command.env,
       stdio: ["ignore", "ignore", "pipe"],
-      encoding: "utf8"
+      encoding: "utf8",
+      timeout: timeoutMs,
+      killSignal: "SIGTERM"
     });
-    if (result.error) throw result.error;
+
+    if (result.error) {
+      if (result.error.code === "ETIMEDOUT") {
+        throw new Error(
+          `${command.name} timed out after ${timeoutMs} ms ` +
+            `(invocation ${index + 1}/${repeats})`
+        );
+      }
+      throw result.error;
+    }
     if (result.status !== 0) {
       throw new Error(
         `${command.name} exited with ${result.status}: ${result.stderr || "no stderr"}`
@@ -93,15 +120,28 @@ function summarize(samples, repeats, bytesPerInvocation) {
   };
 }
 
-function measure(command, configuration) {
-  const firstSampleMs = runCommand(command, configuration.repeats);
+function measure(command, configuration, timeoutMs) {
+  console.log(
+    `  ${command.name}: first sample ` +
+      `(${configuration.repeats} invocation${configuration.repeats === 1 ? "" : "s"})`
+  );
+  const firstSampleMs = runCommand(command, configuration.repeats, timeoutMs);
+  console.log(`    completed in ${formatDuration(firstSampleMs)}`);
+
   for (let index = 0; index < configuration.warmups; index += 1) {
-    runCommand(command, configuration.repeats);
+    console.log(`  ${command.name}: warmup ${index + 1}/${configuration.warmups}`);
+    const elapsed = runCommand(command, configuration.repeats, timeoutMs);
+    console.log(`    completed in ${formatDuration(elapsed)}`);
   }
 
   const samples = [];
   for (let index = 0; index < configuration.iterations; index += 1) {
-    samples.push(runCommand(command, configuration.repeats));
+    console.log(
+      `  ${command.name}: sample ${index + 1}/${configuration.iterations}`
+    );
+    const elapsed = runCommand(command, configuration.repeats, timeoutMs);
+    samples.push(elapsed);
+    console.log(`    completed in ${formatDuration(elapsed)}`);
   }
 
   return {
@@ -110,7 +150,7 @@ function measure(command, configuration) {
   };
 }
 
-function peakRssKiB(command) {
+function peakRssKiB(command, timeoutMs) {
   if (process.platform !== "linux" || !existsSync("/usr/bin/time")) return null;
 
   const directory = mkdtempSync(join(tmpdir(), "lint-md-bench-"));
@@ -122,15 +162,27 @@ function peakRssKiB(command) {
       {
         env: command.env,
         stdio: ["ignore", "ignore", "pipe"],
-        encoding: "utf8"
+        encoding: "utf8",
+        timeout: timeoutMs,
+        killSignal: "SIGTERM"
       }
     );
-    if (result.error) throw result.error;
+
+    if (result.error) {
+      if (result.error.code === "ETIMEDOUT") {
+        throw new Error(
+          `${command.name} memory measurement timed out after ${timeoutMs} ms`
+        );
+      }
+      throw result.error;
+    }
     if (result.status !== 0) {
       throw new Error(
-        `${command.name} memory measurement exited with ${result.status}: ${result.stderr || "no stderr"}`
+        `${command.name} memory measurement exited with ${result.status}: ` +
+          `${result.stderr || "no stderr"}`
       );
     }
+
     const report = readFileSync(output, "utf8");
     const match = /Maximum resident set size \(kbytes\):\s+(\d+)/.exec(report);
     return match ? Number(match[1]) : null;
@@ -177,12 +229,17 @@ function markdownReport(report) {
     "The ratio is descriptive only. Hosted-runner timing is noisy and does not gate CI.",
     "The first sample includes process startup but is not a guaranteed cold filesystem-cache measurement.",
     "Peak RSS is collected only on Linux when `/usr/bin/time` is available.",
+    `Each child process is limited to ${report.environment.commandTimeoutMs} ms.`,
     ""
   );
   return lines.join("\n");
 }
 
 const options = parseArguments(process.argv.slice(2));
+const commandTimeoutMs = positiveIntegerEnvironment(
+  "LINT_MD_BENCH_COMMAND_TIMEOUT_MS",
+  options.smoke ? 30_000 : 120_000
+);
 const rustBinary =
   process.env.LINT_MD_RS_BIN ||
   join(
@@ -204,23 +261,78 @@ for (const required of [rustBinary, typeScriptRunner, coreReference]) {
 
 const definitions = options.smoke
   ? [
-      { name: "startup-tiny", file: "tiny.md", iterations: 3, warmups: 1, repeats: 1 },
-      { name: "medium", file: "medium.md", iterations: 1, warmups: 0, repeats: 1 },
-      { name: "small-files-batch", file: "tiny.md", iterations: 1, warmups: 0, repeats: 5 }
+      {
+        name: "startup-tiny",
+        file: "tiny.md",
+        iterations: 3,
+        warmups: 1,
+        repeats: 1
+      },
+      {
+        name: "medium",
+        file: "medium.md",
+        iterations: 1,
+        warmups: 0,
+        repeats: 1
+      },
+      {
+        name: "small-files-batch",
+        file: "tiny.md",
+        iterations: 1,
+        warmups: 0,
+        repeats: 5
+      }
     ]
   : [
-      { name: "startup-tiny", file: "tiny.md", iterations: 30, warmups: 5, repeats: 1 },
-      { name: "medium", file: "medium.md", iterations: 8, warmups: 2, repeats: 1 },
-      { name: "large", file: "large.md", iterations: 3, warmups: 1, repeats: 1 },
-      { name: "small-files-batch", file: "tiny.md", iterations: 3, warmups: 1, repeats: 50 }
+      {
+        name: "startup-tiny",
+        file: "tiny.md",
+        iterations: 12,
+        warmups: 2,
+        repeats: 1
+      },
+      {
+        name: "medium",
+        file: "medium.md",
+        iterations: 3,
+        warmups: 1,
+        repeats: 1
+      },
+      {
+        name: "large",
+        file: "large.md",
+        iterations: 1,
+        warmups: 0,
+        repeats: 1
+      },
+      {
+        name: "small-files-batch",
+        file: "tiny.md",
+        iterations: 3,
+        warmups: 1,
+        repeats: 20
+      }
     ];
 
+console.log(
+  `Running ${options.smoke ? "smoke" : "full"} benchmark with ` +
+    `${definitions.length} workloads and a ${commandTimeoutMs} ms child-process timeout.`
+);
+
 const workloads = [];
-for (const definition of definitions) {
+for (
+  let definitionIndex = 0;
+  definitionIndex < definitions.length;
+  definitionIndex += 1
+) {
+  const definition = definitions[definitionIndex];
   const file = join(workloadsDir, definition.file);
   if (!existsSync(file)) {
-    throw new Error(`workload missing: ${file}; run node bench/generate-workloads.mjs`);
+    throw new Error(
+      `workload missing: ${file}; run node bench/generate-workloads.mjs`
+    );
   }
+
   const bytes = statSync(file).size;
   const configuration = { ...definition, bytes };
   const sharedEnvironment = {
@@ -240,11 +352,30 @@ for (const definition of definitions) {
     env: sharedEnvironment
   };
 
-  const rust = measure(rustCommand, configuration);
-  const typescript = measure(typeScriptCommand, configuration);
+  console.log(
+    `\n[${definitionIndex + 1}/${definitions.length}] ${definition.name} ` +
+      `(${bytes} bytes; ${definition.iterations} samples; ` +
+      `${definition.repeats} invocation${definition.repeats === 1 ? "" : "s"} per sample)`
+  );
+
+  const rust = measure(rustCommand, configuration, commandTimeoutMs);
+  const typescript = measure(
+    typeScriptCommand,
+    configuration,
+    commandTimeoutMs
+  );
+
   if (!options.smoke) {
-    rust.peakRssKiB = peakRssKiB(rustCommand);
-    typescript.peakRssKiB = peakRssKiB(typeScriptCommand);
+    console.log(`  ${rustCommand.name}: measuring peak RSS`);
+    rust.peakRssKiB = peakRssKiB(rustCommand, commandTimeoutMs);
+    console.log(`    peak RSS: ${rust.peakRssKiB ?? "n/a"} KiB`);
+
+    console.log(`  ${typeScriptCommand.name}: measuring peak RSS`);
+    typescript.peakRssKiB = peakRssKiB(
+      typeScriptCommand,
+      commandTimeoutMs
+    );
+    console.log(`    peak RSS: ${typescript.peakRssKiB ?? "n/a"} KiB`);
   } else {
     rust.peakRssKiB = null;
     typescript.peakRssKiB = null;
@@ -261,6 +392,15 @@ for (const definition of definitions) {
     typescript,
     ratio: typescript.medianMs / rust.medianMs
   });
+
+  console.log(
+    `  completed ${definition.name}: Rust ${formatDuration(rust.medianMs)}, ` +
+      `TypeScript ${formatDuration(typescript.medianMs)}`
+  );
+}
+
+if (!options.smoke) {
+  console.log("\nCollecting distribution sizes.");
 }
 
 const report = {
@@ -277,13 +417,14 @@ const report = {
     nodeVersion: process.version,
     rustcVersion: commandOutput("rustc", ["--version"]),
     repositoryCommit: commandOutput("git", ["rev-parse", "HEAD"]),
-    coreReference
+    coreReference,
+    commandTimeoutMs
   },
   distribution: options.smoke
     ? null
     : {
         rustBinaryBytes: statSync(rustBinary).size,
-        typeScriptBuildBytes: directorySize(join(dirname(coreReference))),
+        typeScriptBuildBytes: directorySize(dirname(coreReference)),
         typeScriptNodeModulesBytes: directorySize(
           join(rootDir, "compat", "core-reference", "node_modules")
         )
@@ -296,6 +437,6 @@ mkdirSync(dirname(options.markdown), { recursive: true });
 writeFileSync(options.output, `${JSON.stringify(report, null, 2)}\n`);
 const markdown = markdownReport(report);
 writeFileSync(options.markdown, markdown);
-console.log(markdown);
+console.log(`\n${markdown}`);
 console.log(`JSON report: ${options.output}`);
 console.log(`Markdown report: ${options.markdown}`);

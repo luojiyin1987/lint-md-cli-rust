@@ -32,6 +32,12 @@ node bench/run.mjs
 
 The harness writes `bench/results/benchmark.json` with environment data and raw samples, plus `bench/results/benchmark.md` with a compact comparison table. Generated workloads and reports are ignored by Git.
 
+The runner reports progress for every workload, implementation, warmup, measured sample, and peak-RSS measurement. Full mode limits each child process to 120 seconds. Override that limit with a positive millisecond value:
+
+```bash
+LINT_MD_BENCH_COMMAND_TIMEOUT_MS=180000 node bench/run.mjs
+```
+
 ## Smoke mode
 
 ```bash
@@ -44,10 +50,10 @@ On Windows, set `LINT_MD_RS_BIN` to `target\\debug\\lint-md-rs.exe`.
 
 ## Measurements
 
-Full mode includes a 4 KiB startup workload, 1 MiB and 5 MiB throughput workloads, and a process-per-file batch of 50 small files. On Linux it also records peak RSS through `/usr/bin/time -v`. Distribution data includes Rust binary size, TypeScript build size, and TypeScript dependency size.
+Full mode includes a 4 KiB startup workload, 1 MiB and 5 MiB throughput workloads, and a process-per-file batch of 20 small files. Expensive workloads intentionally use fewer samples than startup measurements so the full workflow remains bounded. On Linux it also records peak RSS through `/usr/bin/time -v`. Distribution data includes Rust binary size, TypeScript build size, and TypeScript dependency size.
 
 `firstSampleMs` includes process startup but is not a guaranteed cold filesystem-cache measurement. Compare reports only when their recorded environments are sufficiently similar.
 
 ## GitHub Actions
 
-Normal CI runs smoke mode to detect broken scripts. The separate **Benchmark** workflow is manually triggered and uploads JSON and Markdown reports as artifacts. It intentionally does not fail because one implementation becomes slower by a noisy percentage.
+Normal CI runs smoke mode to detect broken scripts. The separate **Benchmark** workflow is manually triggered and uploads JSON and Markdown reports as artifacts. It has a 10-minute job timeout, cancels an older in-progress run for the same ref, and intentionally does not fail because one implementation becomes slower by a noisy percentage.

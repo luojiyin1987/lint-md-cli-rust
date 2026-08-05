@@ -6,11 +6,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   benchmark:
     name: Reproducible TypeScript–Rust benchmark
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +41,8 @@ jobs:
       - name: Generate deterministic workloads
         run: node bench/generate-workloads.mjs
       - name: Run benchmark
+        env:
+          LINT_MD_BENCH_COMMAND_TIMEOUT_MS: 120000
         run: node bench/run.mjs
       - name: Upload benchmark report
         uses: actions/upload-artifact@v4
