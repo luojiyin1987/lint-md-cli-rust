@@ -24,20 +24,26 @@ const block = [
   "```",
   ""
 ].join("\n");
+const headerBytes = Buffer.byteLength(header);
+const blockBytes = Buffer.byteLength(block);
 
 function createDocument(targetBytes) {
-  let content = header;
-  while (Buffer.byteLength(content) + Buffer.byteLength(block) <= targetBytes) {
-    content += block;
+  const chunks = [header];
+  let currentBytes = headerBytes;
+
+  while (currentBytes + blockBytes <= targetBytes) {
+    chunks.push(block);
+    currentBytes += blockBytes;
   }
 
-  const remaining = targetBytes - Buffer.byteLength(content);
+  const remaining = targetBytes - currentBytes;
   if (remaining === 1) {
-    content += "\n";
+    chunks.push("\n");
   } else if (remaining > 1) {
-    content += `${"a".repeat(remaining - 1)}\n`;
+    chunks.push(`${"a".repeat(remaining - 1)}\n`);
   }
 
+  const content = chunks.join("");
   if (Buffer.byteLength(content) !== targetBytes) {
     throw new Error(`failed to generate exactly ${targetBytes} bytes`);
   }
