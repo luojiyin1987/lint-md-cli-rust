@@ -39,13 +39,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check out pinned TypeScript reference
+        uses: actions/checkout@v4
+        with:
+          repository: luojiyin1987/lint-md
+          ref: 9c88a15d43a9dd8637c57157774214a379807d26
+          path: compat/core-reference
+          persist-credentials: false
       - name: Select stable Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
       - name: Build Rust reference binary
         run: cargo build
-      - name: Install TypeScript reference
-        run: npm install --prefix compat --ignore-scripts --no-audit --no-fund
+      - name: Install TypeScript reference dependencies
+        run: npm install --prefix compat/core-reference --ignore-scripts --no-audit --no-fund
+      - name: Build TypeScript reference
+        run: npm run build --prefix compat/core-reference
       - name: Compare implementations
         run: npm test --prefix compat
