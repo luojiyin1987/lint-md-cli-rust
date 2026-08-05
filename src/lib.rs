@@ -1,10 +1,10 @@
-//! Dependency-free validation core for a possible native `lint-md` CLI.
+//! Rust validation core for a possible native `lint-md` CLI.
 //!
-//! This is intentionally a small line-oriented prototype, not a Markdown AST
-//! replacement. Its purpose is to validate the diagnostic, fix and CLI model
-//! before committing to a full parser rewrite.
+//! The prototype combines lightweight scanners for text-oriented rules with
+//! mdast positions for rules that depend on Markdown parsing semantics.
 
-use std::fmt;
+use markdown::{mdast::Node, to_mdast, ParseOptions};
+use std::{fmt, ops::Range};
 
 pub const RULE_NO_FULL_WIDTH_NUMBER: &str = "no-full-width-number";
 pub const RULE_NO_EMPTY_INLINE_CODE: &str = "no-empty-inline-code";
@@ -58,19 +58,23 @@ struct SourceLine<'a> {
 
 /// Lint Markdown using the prototype rule set.
 ///
-/// Diagnostics describe the original input. Fixes are repeated until stable so
-/// interactions such as removing an empty blockquote and then its orphaned
-/// blank line match the TypeScript fix pipeline.
+/// Diagnostics describe the original input. Empty inline-code fixes use mdast
+/// source ranges; scanner fixes then repeat until stable so interacting rules
+/// converge on the TypeScript reference output.
 pub fn lint_markdown(input: &str) -> LintResult {
     let mut diagnostics = Vec::new();
 
     diagnose_blank_lines(input, &mut diagnostics);
-    let mut fixed = fix_line_rules(input, Some(&mut diagnostics));
+    diagnose_line_rules(input, &mut diagnostics);
+    let inline_code_removals = diagnose_empty_inline_code(input, &mut diagnostics);
+
+    let mut fixed = apply_removals(input, &inline_code_removals);
+    fixed = fix_line_rules(&fixed);
     fixed = fix_blank_lines(&fixed);
 
     if fixed != input {
         for _ in 0..3 {
-            let mut next = fix_line_rules(&fixed, None);
+            let mut next = fix_line_rules(&fixed);
             next = fix_blank_lines(&next);
             if next == fixed {
                 break;
@@ -274,7 +278,36 @@ fn fix_blank_lines(input: &str) -> String {
     output
 }
 
-fn fix_line_rules(input: &str, mut diagnostics: Option<&mut Vec<Diagnostic>>) -> String {
+fn diagnose_line_rules(input: &str, diagnostics: &mut Vec<Diagnostic>) {
+    let mut active_fence: Option<Fence> = None;
+
+    for line in parse_lines(input) {
+        let candidate = parse_fence(line.content.trim_start_matches([' ', '\t']));
+        if let Some(current) = active_fence {
+            if candidate
+                .is_some_and(|fence| fence.marker == current.marker && fence.width >= current.width)
+            {
+                active_fence = None;
+            }
+            continue;
+        }
+
+        if let Some(opening) = candidate {
+            active_fence = Some(opening);
+            continue;
+        }
+
+        if line.content.trim_matches([' ', '\t']).is_empty() {
+            continue;
+        }
+
+        diagnose_empty_blockquote(line.content, line.number, diagnostics);
+        diagnose_blockquote_spacing(line.content, line.number, diagnostics);
+        diagnose_full_width_numbers(line.content, line.number, diagnostics);
+    }
+}
+
+fn fix_line_rules(input: &str) -> String {
     let mut fixed = String::with_capacity(input.len());
     let mut active_fence: Option<Fence> = None;
 
@@ -304,18 +337,9 @@ fn fix_line_rules(input: &str, mut diagnostics: Option<&mut Vec<Diagnostic>>) ->
             continue;
         }
 
-        if let Some(items) = diagnostics.as_mut() {
-            let items = &mut **items;
-            diagnose_empty_blockquote(line.content, line.number, items);
-            diagnose_blockquote_spacing(line.content, line.number, items);
-            diagnose_empty_inline_code(line.content, line.number, items);
-            diagnose_full_width_numbers(line.content, line.number, items);
-        }
-
         let mut transformed = fix_empty_blockquote(line.content);
         if !transformed.is_empty() {
             transformed = fix_blockquote_spacing(&transformed);
-            transformed = fix_empty_inline_code(&transformed);
             transformed = fix_full_width_numbers(&transformed);
         }
 
@@ -416,52 +440,67 @@ fn fix_blockquote_spacing(line: &str) -> String {
     output
 }
 
-fn diagnose_empty_inline_code(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
-    for byte_index in exact_double_backticks(line) {
-        diagnostics.push(Diagnostic {
-            rule_id: RULE_NO_EMPTY_INLINE_CODE,
-            message: "Inline code content must not be empty.",
-            line: line_number,
-            column: char_column(line, byte_index),
-            severity: Severity::Error,
-            fixable: true,
-        });
+fn diagnose_empty_inline_code(
+    input: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<Range<usize>> {
+    if !input.as_bytes().contains(&b'`') {
+        return Vec::new();
     }
+
+    let tree = to_mdast(input, &ParseOptions::default())
+        .expect("CommonMark parsing without MDX extensions should not fail");
+    let mut removals = Vec::new();
+    collect_empty_inline_code(&tree, diagnostics, &mut removals);
+    removals.sort_unstable_by_key(|range| range.start);
+    removals
 }
 
-fn exact_double_backticks(line: &str) -> Vec<usize> {
-    let bytes = line.as_bytes();
-    let mut result = Vec::new();
-    let mut index = 0usize;
-    while index + 1 < bytes.len() {
-        if bytes[index] == b'`' && bytes[index + 1] == b'`' {
-            let previous_is_tick = index > 0 && bytes[index - 1] == b'`';
-            let next_is_tick = index + 2 < bytes.len() && bytes[index + 2] == b'`';
-            let escaped = index > 0 && bytes[index - 1] == b'\\';
-            if !previous_is_tick && !next_is_tick && !escaped {
-                result.push(index);
-                index += 2;
-                continue;
+fn collect_empty_inline_code(
+    node: &Node,
+    diagnostics: &mut Vec<Diagnostic>,
+    removals: &mut Vec<Range<usize>>,
+) {
+    if let Node::InlineCode(inline_code) = node {
+        if inline_code.value.trim().is_empty() {
+            if let Some(position) = &inline_code.position {
+                diagnostics.push(Diagnostic {
+                    rule_id: RULE_NO_EMPTY_INLINE_CODE,
+                    message: "Inline code content must not be empty.",
+                    line: position.start.line,
+                    column: position.start.column,
+                    severity: Severity::Error,
+                    fixable: true,
+                });
+                removals.push(position.start.offset..position.end.offset);
             }
         }
-        index += 1;
     }
-    result
+
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_empty_inline_code(child, diagnostics, removals);
+        }
+    }
 }
 
-fn fix_empty_inline_code(line: &str) -> String {
-    let targets = exact_double_backticks(line);
-    if targets.is_empty() {
-        return line.to_owned();
+fn apply_removals(input: &str, removals: &[Range<usize>]) -> String {
+    if removals.is_empty() {
+        return input.to_owned();
     }
 
-    let mut output = String::with_capacity(line.len().saturating_sub(targets.len() * 2));
+    let removed_bytes: usize = removals.iter().map(|range| range.len()).sum();
+    let mut output = String::with_capacity(input.len().saturating_sub(removed_bytes));
     let mut cursor = 0usize;
-    for target in targets {
-        output.push_str(&line[cursor..target]);
-        cursor = target + 2;
+
+    for range in removals {
+        debug_assert!(range.start >= cursor);
+        debug_assert!(range.end <= input.len());
+        output.push_str(&input[cursor..range.start]);
+        cursor = range.end;
     }
-    output.push_str(&line[cursor..]);
+
+    output.push_str(&input[cursor..]);
     output
 }
 
@@ -659,10 +698,35 @@ mod tests {
     }
 
     #[test]
-    fn removes_exact_empty_inline_code_only() {
-        let input = "bad `` but keep ``` and \\`` escaped\n";
+    fn ignores_unmatched_empty_backtick_run() {
+        let input = "before `` after\n";
         let result = lint_markdown(input);
-        assert_eq!(result.fixed, "bad  but keep ``` and \\`` escaped\n");
+        assert_eq!(result.fixed, input);
+        assert!(!result
+            .diagnostics
+            .iter()
+            .any(|item| item.rule_id == RULE_NO_EMPTY_INLINE_CODE));
+    }
+
+    #[test]
+    fn removes_whitespace_only_inline_code_by_mdast_range() {
+        let input = "`        `\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "");
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|item| item.rule_id == RULE_NO_EMPTY_INLINE_CODE)
+            .expect("empty inline code is diagnosed");
+        assert_eq!((diagnostic.line, diagnostic.column), (1, 1));
+        assert!(diagnostic.fixable);
+    }
+
+    #[test]
+    fn respects_matching_backtick_delimiter_widths() {
+        let input = "keep `` ` `` and remove ` `\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "keep `` ` `` and remove \n");
         assert_eq!(
             result
                 .diagnostics
@@ -671,6 +735,19 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn uses_mdast_line_and_column_after_crlf() {
+        let input = "first\r\ntext ` `\r\n";
+        let result = lint_markdown(input);
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|item| item.rule_id == RULE_NO_EMPTY_INLINE_CODE)
+            .expect("empty inline code is diagnosed");
+        assert_eq!((diagnostic.line, diagnostic.column), (2, 6));
+        assert_eq!(result.fixed, "first\r\ntext \r\n");
     }
 
     #[test]
