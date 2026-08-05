@@ -38,6 +38,10 @@ The runner reports progress for every workload, implementation, warmup, measured
 LINT_MD_BENCH_COMMAND_TIMEOUT_MS=180000 node bench/run.mjs
 ```
 
+A child-process timeout is a valid benchmark result rather than a fatal runner error. The timed-out implementation stops its remaining samples and skips peak-RSS measurement for that workload, while the other implementation and later workloads continue. JSON records the timeout phase, configured limit, elapsed time, and invocation index. Markdown displays the result as a timeout.
+
+Reports are created before measurement starts and rewritten after every completed workload. Unexpected errors still return a non-zero exit code, but the report is marked `failed` and preserves workloads completed before the error. Successful runs that contain one or more timeouts finish with status `completed-with-timeouts`.
+
 ## Smoke mode
 
 ```bash
@@ -56,4 +60,4 @@ Full mode includes a 4 KiB startup workload, 1 MiB and 5 MiB throughput workload
 
 ## GitHub Actions
 
-Normal CI runs smoke mode to detect broken scripts. The separate **Benchmark** workflow is manually triggered and uploads JSON and Markdown reports as artifacts. It has a 10-minute job timeout, cancels an older in-progress run for the same ref, and intentionally does not fail because one implementation becomes slower by a noisy percentage.
+Normal CI runs smoke mode and a short forced-timeout scenario to verify that reports survive timeouts. The separate **Benchmark** workflow is manually triggered and uploads JSON and Markdown reports as artifacts. Artifact upload uses `if: always()`, so partial reports are retained when an unexpected benchmark error occurs. The workflow has a 10-minute job timeout, cancels an older in-progress run for the same ref, and intentionally does not fail because one implementation exceeds the per-process performance limit.
