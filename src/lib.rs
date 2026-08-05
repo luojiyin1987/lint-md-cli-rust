@@ -86,7 +86,7 @@ fn process_line(
     fixed: &mut String,
 ) {
     let (line, ending) = split_line_ending(raw_line);
-    let trimmed_start = line.trim_start_matches(|ch| matches!(ch, ' ' | '\t'));
+    let trimmed_start = line.trim_start_matches([' ', '\t']);
     let fence = parse_fence(trimmed_start);
 
     if let Some(current) = active_fence {
@@ -322,14 +322,13 @@ fn visit_text_characters(mut line: &str, mut visitor: impl FnMut(usize, char)) {
                 .chars()
                 .take_while(|candidate| *candidate == '`')
                 .count();
-            let run_bytes = run;
             match active_delimiter {
                 None => active_delimiter = Some(run),
                 Some(width) if width == run => active_delimiter = None,
                 Some(_) => {}
             }
-            absolute_offset += run_bytes;
-            line = &line[run_bytes..];
+            absolute_offset += run;
+            line = &line[run..];
             continue;
         }
 
