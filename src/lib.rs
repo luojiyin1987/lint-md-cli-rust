@@ -48,109 +48,280 @@ struct Fence {
     width: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SourceLine<'a> {
+    content: &'a str,
+    ending: &'a str,
+    number: usize,
+    protected: bool,
+}
+
 /// Lint Markdown using the prototype rule set.
 ///
-/// Diagnostics always describe the original input. `fixed` contains all safe
-/// prototype edits applied in a deterministic order.
+/// Diagnostics describe the original input. Fixes are repeated until stable so
+/// interactions such as removing an empty blockquote and then its orphaned
+/// blank line match the TypeScript fix pipeline.
 pub fn lint_markdown(input: &str) -> LintResult {
     let mut diagnostics = Vec::new();
-    let mut fixed = String::with_capacity(input.len());
-    let mut active_fence: Option<Fence> = None;
-    let mut blank_run = 0usize;
 
-    for (line_index, raw_line) in input.split_inclusive('\n').enumerate() {
-        process_line(
-            raw_line,
-            line_index + 1,
-            &mut active_fence,
-            &mut blank_run,
-            &mut diagnostics,
-            &mut fixed,
-        );
+    diagnose_blank_lines(input, &mut diagnostics);
+    let mut fixed = fix_line_rules(input, Some(&mut diagnostics));
+    fixed = fix_blank_lines(&fixed);
+
+    for _ in 0..3 {
+        let mut next = fix_line_rules(&fixed, None);
+        next = fix_blank_lines(&next);
+        if next == fixed {
+            break;
+        }
+        fixed = next;
     }
 
-    let changed = fixed != input;
     LintResult {
         diagnostics,
+        changed: fixed != input,
         fixed,
-        changed,
     }
 }
 
-fn process_line(
-    raw_line: &str,
-    line_number: usize,
-    active_fence: &mut Option<Fence>,
-    blank_run: &mut usize,
-    diagnostics: &mut Vec<Diagnostic>,
-    fixed: &mut String,
-) {
-    let (line, ending) = split_line_ending(raw_line);
-    let trimmed_start = line.trim_start_matches([' ', '\t']);
-    let fence = parse_fence(trimmed_start);
+fn parse_lines(input: &str) -> Vec<SourceLine<'_>> {
+    let mut lines = Vec::new();
+    let bytes = input.as_bytes();
+    let mut start = 0usize;
+    let mut number = 1usize;
 
-    if let Some(current) = active_fence {
-        fixed.push_str(line);
-        fixed.push_str(ending);
-        if fence.is_some_and(|candidate| {
-            candidate.marker == current.marker && candidate.width >= current.width
-        }) {
-            *active_fence = None;
+    while start < bytes.len() {
+        let mut end = start;
+        while end < bytes.len() && !matches!(bytes[end], b'\r' | b'\n') {
+            end += 1;
         }
-        *blank_run = 0;
-        return;
-    }
 
-    if let Some(opening) = fence {
-        *active_fence = Some(opening);
-        fixed.push_str(line);
-        fixed.push_str(ending);
-        *blank_run = 0;
-        return;
-    }
-
-    if line.trim().is_empty() {
-        *blank_run += 1;
-        if *blank_run > 1 {
-            diagnostics.push(Diagnostic {
-                rule_id: RULE_NO_MULTIPLE_BLANK_LINES,
-                message: "Multiple consecutive blank lines are not allowed.",
-                line: line_number,
-                column: 1,
-                severity: Severity::Error,
-                fixable: true,
-            });
-            return;
-        }
-        fixed.push_str(line);
-        fixed.push_str(ending);
-        return;
-    }
-    *blank_run = 0;
-
-    diagnose_empty_blockquote(line, line_number, diagnostics);
-    diagnose_blockquote_spacing(line, line_number, diagnostics);
-    diagnose_empty_inline_code(line, line_number, diagnostics);
-    diagnose_full_width_numbers(line, line_number, diagnostics);
-
-    let mut transformed = fix_blockquote_spacing(line);
-    transformed = fix_empty_inline_code(&transformed);
-    transformed = fix_full_width_numbers(&transformed);
-
-    fixed.push_str(&transformed);
-    fixed.push_str(ending);
-}
-
-fn split_line_ending(raw_line: &str) -> (&str, &str) {
-    if let Some(without_lf) = raw_line.strip_suffix('\n') {
-        if let Some(without_crlf) = without_lf.strip_suffix('\r') {
-            (without_crlf, "\r\n")
+        let ending_end = if end == bytes.len() {
+            end
+        } else if bytes[end] == b'\r' && end + 1 < bytes.len() && bytes[end + 1] == b'\n' {
+            end + 2
         } else {
-            (without_lf, "\n")
-        }
-    } else {
-        (raw_line, "")
+            end + 1
+        };
+
+        lines.push(SourceLine {
+            content: &input[start..end],
+            ending: &input[end..ending_end],
+            number,
+            protected: false,
+        });
+
+        start = ending_end;
+        number += 1;
     }
+
+    lines
+}
+
+fn mark_protected_lines(lines: &mut [SourceLine<'_>]) {
+    let mut active_fence: Option<Fence> = None;
+
+    for line in lines {
+        let candidate = parse_fence(line.content.trim_start_matches([' ', '\t']));
+        if let Some(current) = active_fence {
+            line.protected = true;
+            if candidate
+                .is_some_and(|fence| fence.marker == current.marker && fence.width >= current.width)
+            {
+                active_fence = None;
+            }
+            continue;
+        }
+
+        if let Some(opening) = candidate {
+            line.protected = true;
+            active_fence = Some(opening);
+        }
+    }
+}
+
+fn is_blank_line(line: SourceLine<'_>) -> bool {
+    !line.protected && line.content.trim_matches([' ', '\t']).is_empty()
+}
+
+fn diagnose_blank_lines(input: &str, diagnostics: &mut Vec<Diagnostic>) {
+    if input.is_empty() {
+        return;
+    }
+
+    if input.chars().all(|ch| matches!(ch, ' ' | '\t')) {
+        diagnostics.push(blank_line_diagnostic(
+            1,
+            1,
+            "Whitespace-only documents should be empty.",
+        ));
+        return;
+    }
+
+    let mut lines = parse_lines(input);
+    mark_protected_lines(&mut lines);
+    if lines.is_empty() {
+        return;
+    }
+
+    let mut index = 0usize;
+    while index < lines.len() && is_blank_line(lines[index]) {
+        index += 1;
+    }
+    if index > 0 {
+        diagnostics.push(blank_line_diagnostic(
+            1,
+            1,
+            "Documents must not start with blank lines.",
+        ));
+    }
+
+    while index < lines.len() {
+        if is_blank_line(lines[index]) {
+            index += 1;
+            continue;
+        }
+
+        let previous = lines[index];
+        index += 1;
+        let blank_start = index;
+        while index < lines.len() && is_blank_line(lines[index]) {
+            index += 1;
+        }
+        let run = index - blank_start;
+        if run == 0 {
+            continue;
+        }
+
+        let column = previous.content.chars().count() + 1;
+        if index == lines.len() {
+            diagnostics.push(blank_line_diagnostic(
+                previous.number,
+                column,
+                "Documents must end with at most one newline.",
+            ));
+        } else if run > 1 {
+            diagnostics.push(blank_line_diagnostic(
+                previous.number,
+                column,
+                "Consecutive blank lines are not allowed.",
+            ));
+        }
+    }
+}
+
+fn blank_line_diagnostic(line: usize, column: usize, message: &'static str) -> Diagnostic {
+    Diagnostic {
+        rule_id: RULE_NO_MULTIPLE_BLANK_LINES,
+        message,
+        line,
+        column,
+        severity: Severity::Error,
+        fixable: true,
+    }
+}
+
+fn fix_blank_lines(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+    if input.chars().all(|ch| matches!(ch, ' ' | '\t')) {
+        return String::new();
+    }
+
+    let mut lines = parse_lines(input);
+    mark_protected_lines(&mut lines);
+    if lines.is_empty() {
+        return input.to_owned();
+    }
+
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0usize;
+    while index < lines.len() && is_blank_line(lines[index]) {
+        index += 1;
+    }
+
+    while index < lines.len() {
+        let line = lines[index];
+        if is_blank_line(line) {
+            index += 1;
+            continue;
+        }
+
+        output.push_str(line.content);
+        output.push_str(line.ending);
+        index += 1;
+
+        let blank_start = index;
+        while index < lines.len() && is_blank_line(lines[index]) {
+            index += 1;
+        }
+        let run = index - blank_start;
+        if run == 0 || index == lines.len() {
+            continue;
+        }
+
+        if run == 1 {
+            output.push_str(lines[blank_start].content);
+            output.push_str(lines[blank_start].ending);
+        } else {
+            output.push_str(line.ending);
+        }
+    }
+
+    output
+}
+
+fn fix_line_rules(input: &str, mut diagnostics: Option<&mut Vec<Diagnostic>>) -> String {
+    let mut fixed = String::with_capacity(input.len());
+    let mut active_fence: Option<Fence> = None;
+
+    for line in parse_lines(input) {
+        let candidate = parse_fence(line.content.trim_start_matches([' ', '\t']));
+        if let Some(current) = active_fence {
+            fixed.push_str(line.content);
+            fixed.push_str(line.ending);
+            if candidate
+                .is_some_and(|fence| fence.marker == current.marker && fence.width >= current.width)
+            {
+                active_fence = None;
+            }
+            continue;
+        }
+
+        if let Some(opening) = candidate {
+            active_fence = Some(opening);
+            fixed.push_str(line.content);
+            fixed.push_str(line.ending);
+            continue;
+        }
+
+        if line.content.trim_matches([' ', '\t']).is_empty() {
+            fixed.push_str(line.content);
+            fixed.push_str(line.ending);
+            continue;
+        }
+
+        if let Some(items) = diagnostics.as_mut() {
+            let items = &mut **items;
+            diagnose_empty_blockquote(line.content, line.number, items);
+            diagnose_blockquote_spacing(line.content, line.number, items);
+            diagnose_empty_inline_code(line.content, line.number, items);
+            diagnose_full_width_numbers(line.content, line.number, items);
+        }
+
+        let mut transformed = fix_empty_blockquote(line.content);
+        if !transformed.is_empty() {
+            transformed = fix_blockquote_spacing(&transformed);
+            transformed = fix_empty_inline_code(&transformed);
+            transformed = fix_full_width_numbers(&transformed);
+        }
+
+        fixed.push_str(&transformed);
+        fixed.push_str(line.ending);
+    }
+
+    fixed
 }
 
 fn parse_fence(line: &str) -> Option<Fence> {
@@ -174,8 +345,7 @@ fn char_column(line: &str, byte_index: usize) -> usize {
 
 fn blockquote_parts(line: &str) -> Option<(usize, &str)> {
     let prefix = leading_whitespace_bytes(line);
-    let remainder = &line[prefix..];
-    remainder
+    line[prefix..]
         .strip_prefix('>')
         .map(|after_marker| (prefix, after_marker))
 }
@@ -189,21 +359,32 @@ fn diagnose_empty_blockquote(line: &str, line_number: usize, diagnostics: &mut V
                 line: line_number,
                 column: char_column(line, marker_index),
                 severity: Severity::Error,
-                fixable: false,
+                fixable: true,
             });
         }
     }
 }
 
+fn fix_empty_blockquote(line: &str) -> String {
+    if blockquote_parts(line).is_some_and(|(_, after_marker)| after_marker.trim().is_empty()) {
+        String::new()
+    } else {
+        line.to_owned()
+    }
+}
+
 fn diagnose_blockquote_spacing(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
     if let Some((marker_index, after_marker)) = blockquote_parts(line) {
+        if after_marker.trim().is_empty() {
+            return;
+        }
         let spaces = after_marker.chars().take_while(|ch| *ch == ' ').count();
-        if spaces > 1 {
+        if spaces != 1 {
             diagnostics.push(Diagnostic {
                 rule_id: RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE,
                 message: "Use exactly one space after the blockquote marker.",
                 line: line_number,
-                column: char_column(line, marker_index) + 1,
+                column: char_column(line, marker_index),
                 severity: Severity::Error,
                 fixable: true,
             });
@@ -215,8 +396,12 @@ fn fix_blockquote_spacing(line: &str) -> String {
     let Some((marker_index, after_marker)) = blockquote_parts(line) else {
         return line.to_owned();
     };
+    if after_marker.trim().is_empty() {
+        return line.to_owned();
+    }
+
     let spaces = after_marker.chars().take_while(|ch| *ch == ' ').count();
-    if spaces <= 1 {
+    if spaces == 1 {
         return line.to_owned();
     }
 
@@ -279,18 +464,61 @@ fn fix_empty_inline_code(line: &str) -> String {
 }
 
 fn diagnose_full_width_numbers(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
-    visit_text_characters(line, |byte_index, ch| {
-        if is_full_width_digit(ch) {
-            diagnostics.push(Diagnostic {
-                rule_id: RULE_NO_FULL_WIDTH_NUMBER,
-                message: "Use half-width ASCII digits.",
-                line: line_number,
-                column: char_column(line, byte_index),
-                severity: Severity::Error,
-                fixable: true,
-            });
+    for byte_index in full_width_digit_run_starts(line) {
+        diagnostics.push(Diagnostic {
+            rule_id: RULE_NO_FULL_WIDTH_NUMBER,
+            message: "Use half-width ASCII digits.",
+            line: line_number,
+            column: char_column(line, byte_index),
+            severity: Severity::Error,
+            fixable: true,
+        });
+    }
+}
+
+fn full_width_digit_run_starts(line: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut active_delimiter: Option<usize> = None;
+    let mut digit_run: Option<usize> = None;
+    let mut byte_index = 0usize;
+
+    while byte_index < line.len() {
+        let ch = line[byte_index..]
+            .chars()
+            .next()
+            .expect("byte index is on a character boundary");
+
+        if ch == '`' {
+            if let Some(start) = digit_run.take() {
+                starts.push(start);
+            }
+            let run = line[byte_index..]
+                .chars()
+                .take_while(|candidate| *candidate == '`')
+                .count();
+            match active_delimiter {
+                None => active_delimiter = Some(run),
+                Some(width) if width == run => active_delimiter = None,
+                Some(_) => {}
+            }
+            byte_index += run;
+            continue;
         }
-    });
+
+        if active_delimiter.is_none() && is_full_width_digit(ch) {
+            if digit_run.is_none() {
+                digit_run = Some(byte_index);
+            }
+        } else if let Some(start) = digit_run.take() {
+            starts.push(start);
+        }
+        byte_index += ch.len_utf8();
+    }
+
+    if let Some(start) = digit_run {
+        starts.push(start);
+    }
+    starts
 }
 
 fn fix_full_width_numbers(line: &str) -> String {
@@ -315,8 +543,10 @@ fn visit_text_characters(mut line: &str, mut visitor: impl FnMut(usize, char)) {
     let mut active_delimiter: Option<usize> = None;
 
     while !line.is_empty() {
-        let mut chars = line.char_indices();
-        let (_, ch) = chars.next().expect("non-empty string has a character");
+        let ch = line
+            .chars()
+            .next()
+            .expect("non-empty string has a character");
         if ch == '`' {
             let run = line
                 .chars()
@@ -378,7 +608,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixes_full_width_numbers_but_skips_code() {
+    fn groups_full_width_numbers_and_skips_code() {
         let input = "版本１２ and `３４`\n```text\n５６\n```\n";
         let result = lint_markdown(input);
         assert_eq!(result.fixed, "版本12 and `３４`\n```text\n５６\n```\n");
@@ -388,34 +618,42 @@ mod tests {
                 .iter()
                 .filter(|item| item.rule_id == RULE_NO_FULL_WIDTH_NUMBER)
                 .count(),
-            2
+            1
         );
     }
 
     #[test]
-    fn removes_extra_blank_lines_and_preserves_crlf() {
-        let input = "first\r\n\r\n\r\nsecond\r\n";
+    fn normalizes_blank_line_runs_and_preserves_crlf() {
+        let input = "\r\nfirst\r\n\r\n\r\nsecond\r\n\r\n";
         let result = lint_markdown(input);
         assert_eq!(result.fixed, "first\r\n\r\nsecond\r\n");
-        assert!(result
-            .diagnostics
-            .iter()
-            .any(|item| item.rule_id == RULE_NO_MULTIPLE_BLANK_LINES));
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|item| item.rule_id == RULE_NO_MULTIPLE_BLANK_LINES)
+                .count(),
+            3
+        );
     }
 
     #[test]
-    fn fixes_blockquote_spacing_but_reports_empty_blockquote() {
-        let input = ">   text\n>\n";
+    fn fixes_blockquote_spacing_and_removes_empty_blockquote() {
+        let input = ">   text\n>missing\n>\n";
         let result = lint_markdown(input);
-        assert_eq!(result.fixed, "> text\n>\n");
+        assert_eq!(result.fixed, "> text\n> missing\n");
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|item| item.rule_id == RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE)
+                .count(),
+            2
+        );
         assert!(result
             .diagnostics
             .iter()
-            .any(|item| item.rule_id == RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE));
-        assert!(result
-            .diagnostics
-            .iter()
-            .any(|item| item.rule_id == RULE_NO_EMPTY_BLOCKQUOTE && !item.fixable));
+            .any(|item| item.rule_id == RULE_NO_EMPTY_BLOCKQUOTE && item.fixable));
     }
 
     #[test]
@@ -439,6 +677,15 @@ mod tests {
         let result = lint_markdown(input);
         assert_eq!(result.fixed, input);
         assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn removes_whitespace_only_documents() {
+        let result = lint_markdown("  \t");
+        assert_eq!(result.fixed, "");
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(result.diagnostics[0].line, 1);
+        assert_eq!(result.diagnostics[0].column, 1);
     }
 
     #[test]

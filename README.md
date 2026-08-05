@@ -48,13 +48,13 @@ Exit codes:
 
 | Rule | Fix | Notes |
 | --- | --- | --- |
-| `no-full-width-number` | Yes | Skips inline code and fenced code |
+| `no-full-width-number` | Yes | Groups contiguous digits and skips inline and fenced code |
 | `no-empty-inline-code` | Yes | Removes exact unescaped empty backtick pairs |
-| `no-empty-blockquote` | No | Demonstrates a non-fixable diagnostic |
-| `no-multiple-space-blockquote` | Yes | Collapses spaces after the first `>` marker |
-| `no-multiple-blank-lines` | Yes | Keeps one blank line and preserves line endings |
+| `no-empty-blockquote` | Yes | Removes empty blockquotes |
+| `no-multiple-space-blockquote` | Yes | Inserts or collapses spacing after the first `>` marker |
+| `no-multiple-blank-lines` | Yes | Normalizes leading, trailing and repeated blank lines while preserving line endings |
 
-These are line-oriented approximations. They deliberately do not claim full Markdown AST compatibility.
+These are line-oriented approximations. They deliberately do not claim full Markdown AST compatibility. Fixes are repeated until stable so interactions between scanner rules converge on the same output as the TypeScript reference.
 
 ## Development
 
@@ -66,7 +66,7 @@ cargo test --all-targets
 
 ## Validation plan
 
-See [`docs/VALIDATION.md`](docs/VALIDATION.md). The next useful step is a differential harness that runs the TypeScript CLI and this prototype over the same fixture corpus, then compares diagnostics, exit codes and fixed output.
+See [`docs/VALIDATION.md`](docs/VALIDATION.md). Compatibility is continuously checked by running the pinned TypeScript Core and this prototype over the same fixture corpus, then comparing diagnostics, exit codes and fixed output.
 
 ## Non-goals
 
