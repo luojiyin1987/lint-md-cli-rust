@@ -3,7 +3,10 @@
 //! The prototype combines lightweight scanners for text-oriented rules with
 //! mdast positions for rules that depend on Markdown parsing semantics.
 
-use markdown::{mdast::Node, to_mdast, ParseOptions};
+use markdown::{
+    mdast::{InlineCode, Node},
+    to_mdast, ParseOptions,
+};
 use std::{fmt, ops::Range};
 
 pub const RULE_NO_FULL_WIDTH_NUMBER: &str = "no-full-width-number";
@@ -440,10 +443,7 @@ fn fix_blockquote_spacing(line: &str) -> String {
     output
 }
 
-fn diagnose_empty_inline_code(
-    input: &str,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Vec<Range<usize>> {
+fn diagnose_empty_inline_code(input: &str, diagnostics: &mut Vec<Diagnostic>) -> Vec<Range<usize>> {
     if !input.as_bytes().contains(&b'`') {
         return Vec::new();
     }
@@ -462,19 +462,7 @@ fn collect_empty_inline_code(
     removals: &mut Vec<Range<usize>>,
 ) {
     if let Node::InlineCode(inline_code) = node {
-        if inline_code.value.trim().is_empty() {
-            if let Some(position) = &inline_code.position {
-                diagnostics.push(Diagnostic {
-                    rule_id: RULE_NO_EMPTY_INLINE_CODE,
-                    message: "Inline code content must not be empty.",
-                    line: position.start.line,
-                    column: position.start.column,
-                    severity: Severity::Error,
-                    fixable: true,
-                });
-                removals.push(position.start.offset..position.end.offset);
-            }
-        }
+        collect_empty_inline_code_node(inline_code, diagnostics, removals);
     }
 
     if let Some(children) = node.children() {
@@ -482,6 +470,29 @@ fn collect_empty_inline_code(
             collect_empty_inline_code(child, diagnostics, removals);
         }
     }
+}
+
+fn collect_empty_inline_code_node(
+    inline_code: &InlineCode,
+    diagnostics: &mut Vec<Diagnostic>,
+    removals: &mut Vec<Range<usize>>,
+) {
+    if !inline_code.value.trim().is_empty() {
+        return;
+    }
+    let Some(position) = &inline_code.position else {
+        return;
+    };
+
+    diagnostics.push(Diagnostic {
+        rule_id: RULE_NO_EMPTY_INLINE_CODE,
+        message: "Inline code content must not be empty.",
+        line: position.start.line,
+        column: position.start.column,
+        severity: Severity::Error,
+        fixable: true,
+    });
+    removals.push(position.start.offset..position.end.offset);
 }
 
 fn apply_removals(input: &str, removals: &[Range<usize>]) -> String {
