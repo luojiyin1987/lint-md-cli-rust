@@ -6,6 +6,6 @@
     "test": "node compare.mjs"
   },
   "dependencies": {
-    "@lint-md/core": "2.3.0"
+    "@lint-md/core": "2.1.3"
   }
 }
