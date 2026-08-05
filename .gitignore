@@ -1,3 +1,6 @@
 /target/
+/bench/workloads/
+/bench/results/
+/compat/core-reference/
 *.swp
 .DS_Store
