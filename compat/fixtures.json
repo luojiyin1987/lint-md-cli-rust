@@ -1,0 +1,17 @@
+[
+  {"id":"no-full-width-number/basic","path":"fixtures/no-full-width-number/basic.md"},
+  {"id":"no-full-width-number/inline-code","path":"fixtures/no-full-width-number/inline-code.md"},
+  {"id":"no-full-width-number/fenced-code","path":"fixtures/no-full-width-number/fenced-code.md"},
+  {"id":"no-empty-inline-code/exact","path":"fixtures/no-empty-inline-code/exact.md"},
+  {"id":"no-empty-inline-code/whitespace","path":"fixtures/no-empty-inline-code/whitespace.md"},
+  {"id":"no-empty-inline-code/fenced-code","path":"fixtures/no-empty-inline-code/fenced-code.md"},
+  {"id":"no-empty-blockquote/empty","path":"fixtures/no-empty-blockquote/empty.md"},
+  {"id":"no-empty-blockquote/non-empty","path":"fixtures/no-empty-blockquote/non-empty.md"},
+  {"id":"no-multiple-space-blockquote/multiple","path":"fixtures/no-multiple-space-blockquote/multiple.md"},
+  {"id":"no-multiple-space-blockquote/missing","path":"fixtures/no-multiple-space-blockquote/missing.md"},
+  {"id":"no-multiple-blank-lines/middle","path":"fixtures/no-multiple-blank-lines/middle.md"},
+  {"id":"no-multiple-blank-lines/leading","path":"fixtures/no-multiple-blank-lines/leading.md"},
+  {"id":"no-multiple-blank-lines/trailing","path":"fixtures/no-multiple-blank-lines/trailing.md"},
+  {"id":"no-multiple-blank-lines/whitespace-only","path":"fixtures/no-multiple-blank-lines/whitespace-only.md"},
+  {"id":"no-multiple-blank-lines/fenced-code","path":"fixtures/no-multiple-blank-lines/fenced-code.md"}
+]
