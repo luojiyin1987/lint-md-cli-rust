@@ -7,7 +7,7 @@ use markdown::{
     mdast::{InlineCode, Node},
     to_mdast, ParseOptions,
 };
-use std::{fmt, ops::Range};
+use std::{collections::HashMap, fmt, ops::Range};
 
 pub const RULE_NO_FULL_WIDTH_NUMBER: &str = "no-full-width-number";
 pub const RULE_NO_EMPTY_INLINE_CODE: &str = "no-empty-inline-code";
@@ -444,7 +444,7 @@ fn fix_blockquote_spacing(line: &str) -> String {
 }
 
 fn diagnose_empty_inline_code(input: &str, diagnostics: &mut Vec<Diagnostic>) -> Vec<Range<usize>> {
-    if !input.as_bytes().contains(&b'`') {
+    if !may_contain_whitespace_only_inline_code(input) {
         return Vec::new();
     }
 
@@ -454,6 +454,33 @@ fn diagnose_empty_inline_code(input: &str, diagnostics: &mut Vec<Diagnostic>) ->
     collect_empty_inline_code(&tree, diagnostics, &mut removals);
     removals.sort_unstable_by_key(|range| range.start);
     removals
+}
+
+fn may_contain_whitespace_only_inline_code(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut previous_runs = HashMap::<usize, usize>::new();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < bytes.len() && bytes[index] == b'`' {
+            index += 1;
+        }
+        let width = index - start;
+
+        if let Some(previous_end) = previous_runs.insert(width, index) {
+            if input[previous_end..start].chars().all(char::is_whitespace) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn collect_empty_inline_code(
@@ -759,6 +786,17 @@ mod tests {
             .expect("empty inline code is diagnosed");
         assert_eq!((diagnostic.line, diagnostic.column), (2, 6));
         assert_eq!(result.fixed, "first\r\ntext \r\n");
+    }
+
+    #[test]
+    fn prefilters_non_empty_code_without_parsing_the_document() {
+        assert!(!may_contain_whitespace_only_inline_code(
+            "Inline `code` remains non-empty.\n```text\nsample\n```\n"
+        ));
+        assert!(!may_contain_whitespace_only_inline_code(
+            "before `` after\n"
+        ));
+        assert!(may_contain_whitespace_only_inline_code("` \t `\n"));
     }
 
     #[test]
