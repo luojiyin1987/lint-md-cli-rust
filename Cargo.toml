@@ -3,10 +3,13 @@ name = "lint-md-cli-rust"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
-description = "A dependency-free Rust validation prototype for lint-md"
+description = "A Rust validation prototype for lint-md"
 license = "MIT"
 repository = "https://github.com/luojiyin1987/lint-md-cli-rust"
 publish = false
+
+[dependencies]
+markdown = "=1.0.0"
 
 [lib]
 name = "lint_md_cli_rust"
