@@ -55,6 +55,7 @@ struct Fence {
 struct SourceLine<'a> {
     content: &'a str,
     ending: &'a str,
+    start: usize,
     number: usize,
     protected: bool,
 }
@@ -116,6 +117,7 @@ fn parse_lines(input: &str) -> Vec<SourceLine<'_>> {
         lines.push(SourceLine {
             content: &input[start..end],
             ending: &input[end..ending_end],
+            start,
             number,
             protected: false,
         });
@@ -283,6 +285,7 @@ fn fix_blank_lines(input: &str) -> String {
 
 fn diagnose_line_rules(input: &str, diagnostics: &mut Vec<Diagnostic>) {
     let mut active_fence: Option<Fence> = None;
+    let inline_code_ranges = full_width_inline_code_ranges(input);
 
     for line in parse_lines(input) {
         let candidate = parse_fence(line.content.trim_start_matches([' ', '\t']));
@@ -306,13 +309,20 @@ fn diagnose_line_rules(input: &str, diagnostics: &mut Vec<Diagnostic>) {
 
         diagnose_empty_blockquote(line.content, line.number, diagnostics);
         diagnose_blockquote_spacing(line.content, line.number, diagnostics);
-        diagnose_full_width_numbers(line.content, line.number, diagnostics);
+        diagnose_full_width_numbers(
+            line.content,
+            line.start,
+            line.number,
+            &inline_code_ranges,
+            diagnostics,
+        );
     }
 }
 
 fn fix_line_rules(input: &str) -> String {
     let mut fixed = String::with_capacity(input.len());
     let mut active_fence: Option<Fence> = None;
+    let inline_code_ranges = full_width_inline_code_ranges(input);
 
     for line in parse_lines(input) {
         let candidate = parse_fence(line.content.trim_start_matches([' ', '\t']));
@@ -340,10 +350,10 @@ fn fix_line_rules(input: &str) -> String {
             continue;
         }
 
-        let mut transformed = fix_empty_blockquote(line.content);
+        let mut transformed = fix_full_width_numbers(line.content, line.start, &inline_code_ranges);
+        transformed = fix_empty_blockquote(&transformed);
         if !transformed.is_empty() {
             transformed = fix_blockquote_spacing(&transformed);
-            transformed = fix_full_width_numbers(&transformed);
         }
 
         fixed.push_str(&transformed);
@@ -542,8 +552,48 @@ fn apply_removals(input: &str, removals: &[Range<usize>]) -> String {
     output
 }
 
-fn diagnose_full_width_numbers(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
-    for byte_index in full_width_digit_run_starts(line) {
+fn full_width_inline_code_ranges(input: &str) -> Vec<Range<usize>> {
+    if !input.contains('`') || !input.chars().any(is_full_width_digit) {
+        return Vec::new();
+    }
+
+    let tree = to_mdast(input, &ParseOptions::default())
+        .expect("CommonMark parsing without MDX extensions should not fail");
+    let mut ranges = Vec::new();
+    collect_inline_code_ranges(&tree, &mut ranges);
+    ranges.sort_unstable_by_key(|range| range.start);
+    ranges
+}
+
+fn collect_inline_code_ranges(node: &Node, ranges: &mut Vec<Range<usize>>) {
+    if let Node::InlineCode(inline_code) = node {
+        if let Some(position) = &inline_code.position {
+            ranges.push(position.start.offset..position.end.offset);
+        }
+    }
+
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_inline_code_ranges(child, ranges);
+        }
+    }
+}
+
+fn offset_is_in_ranges(offset: usize, ranges: &[Range<usize>]) -> bool {
+    let index = ranges.partition_point(|range| range.end <= offset);
+    ranges
+        .get(index)
+        .is_some_and(|range| range.contains(&offset))
+}
+
+fn diagnose_full_width_numbers(
+    line: &str,
+    line_start: usize,
+    line_number: usize,
+    inline_code_ranges: &[Range<usize>],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for byte_index in full_width_digit_run_starts(line, line_start, inline_code_ranges) {
         diagnostics.push(Diagnostic {
             rule_id: RULE_NO_FULL_WIDTH_NUMBER,
             message: "Use half-width ASCII digits.",
@@ -555,43 +605,23 @@ fn diagnose_full_width_numbers(line: &str, line_number: usize, diagnostics: &mut
     }
 }
 
-fn full_width_digit_run_starts(line: &str) -> Vec<usize> {
+fn full_width_digit_run_starts(
+    line: &str,
+    line_start: usize,
+    inline_code_ranges: &[Range<usize>],
+) -> Vec<usize> {
     let mut starts = Vec::new();
-    let mut active_delimiter: Option<usize> = None;
     let mut digit_run: Option<usize> = None;
-    let mut byte_index = 0usize;
 
-    while byte_index < line.len() {
-        let ch = line[byte_index..]
-            .chars()
-            .next()
-            .expect("byte index is on a character boundary");
-
-        if ch == '`' {
-            if let Some(start) = digit_run.take() {
-                starts.push(start);
-            }
-            let run = line[byte_index..]
-                .chars()
-                .take_while(|candidate| *candidate == '`')
-                .count();
-            match active_delimiter {
-                None => active_delimiter = Some(run),
-                Some(width) if width == run => active_delimiter = None,
-                Some(_) => {}
-            }
-            byte_index += run;
-            continue;
-        }
-
-        if active_delimiter.is_none() && is_full_width_digit(ch) {
+    for (byte_index, ch) in line.char_indices() {
+        let protected = offset_is_in_ranges(line_start + byte_index, inline_code_ranges);
+        if !protected && is_full_width_digit(ch) {
             if digit_run.is_none() {
                 digit_run = Some(byte_index);
             }
         } else if let Some(start) = digit_run.take() {
             starts.push(start);
         }
-        byte_index += ch.len_utf8();
     }
 
     if let Some(start) = digit_run {
@@ -600,54 +630,30 @@ fn full_width_digit_run_starts(line: &str) -> Vec<usize> {
     starts
 }
 
-fn fix_full_width_numbers(line: &str) -> String {
+fn fix_full_width_numbers(
+    line: &str,
+    line_start: usize,
+    inline_code_ranges: &[Range<usize>],
+) -> String {
     let mut output = String::with_capacity(line.len());
     let mut cursor = 0usize;
-    visit_text_characters(line, |byte_index, ch| {
+
+    for (byte_index, ch) in line.char_indices() {
+        if offset_is_in_ranges(line_start + byte_index, inline_code_ranges) {
+            continue;
+        }
         if let Some(ascii) = to_ascii_digit(ch) {
             output.push_str(&line[cursor..byte_index]);
             output.push(ascii);
             cursor = byte_index + ch.len_utf8();
         }
-    });
+    }
+
     if cursor == 0 {
         return line.to_owned();
     }
     output.push_str(&line[cursor..]);
     output
-}
-
-fn visit_text_characters(mut line: &str, mut visitor: impl FnMut(usize, char)) {
-    let mut absolute_offset = 0usize;
-    let mut active_delimiter: Option<usize> = None;
-
-    while !line.is_empty() {
-        let ch = line
-            .chars()
-            .next()
-            .expect("non-empty string has a character");
-        if ch == '`' {
-            let run = line
-                .chars()
-                .take_while(|candidate| *candidate == '`')
-                .count();
-            match active_delimiter {
-                None => active_delimiter = Some(run),
-                Some(width) if width == run => active_delimiter = None,
-                Some(_) => {}
-            }
-            absolute_offset += run;
-            line = &line[run..];
-            continue;
-        }
-
-        if active_delimiter.is_none() {
-            visitor(absolute_offset, ch);
-        }
-        let width = ch.len_utf8();
-        absolute_offset += width;
-        line = &line[width..];
-    }
 }
 
 fn is_full_width_digit(ch: char) -> bool {
@@ -691,6 +697,65 @@ mod tests {
         let input = "版本１２ and `３４`\n```text\n５６\n```\n";
         let result = lint_markdown(input);
         assert_eq!(result.fixed, "版本12 and `３４`\n```text\n５６\n```\n");
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|item| item.rule_id == RULE_NO_FULL_WIDTH_NUMBER)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn fixes_full_width_numbers_after_unmatched_backticks() {
+        let input = "before `１２ after ３４\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "before `12 after 34\n");
+        let columns = result
+            .diagnostics
+            .iter()
+            .filter(|item| item.rule_id == RULE_NO_FULL_WIDTH_NUMBER)
+            .map(|item| item.column)
+            .collect::<Vec<_>>();
+        assert_eq!(columns, vec![9, 18]);
+    }
+
+    #[test]
+    fn protects_only_valid_inline_code_ranges() {
+        let input = "`１２` and ３４\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "`１２` and 34\n");
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|item| item.rule_id == RULE_NO_FULL_WIDTH_NUMBER)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn treats_mismatched_backtick_runs_as_text() {
+        let input = "before ``１２` after ３４\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "before ``12` after 34\n");
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|item| item.rule_id == RULE_NO_FULL_WIDTH_NUMBER)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn protects_full_width_numbers_in_multiline_code_spans() {
+        let input = "before `１２\ncontinued ３４` outside ５６\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "before `１２\ncontinued ３４` outside 56\n");
         assert_eq!(
             result
                 .diagnostics
@@ -797,6 +862,13 @@ mod tests {
             "before `` after\n"
         ));
         assert!(may_contain_whitespace_only_inline_code("` \t `\n"));
+    }
+
+    #[test]
+    fn prefilters_full_width_inline_code_parsing() {
+        assert!(full_width_inline_code_ranges("Inline `code` only.\n").is_empty());
+        assert!(full_width_inline_code_ranges("版本１２ only.\n").is_empty());
+        assert_eq!(full_width_inline_code_ranges("`１２`\n").len(), 1);
     }
 
     #[test]
