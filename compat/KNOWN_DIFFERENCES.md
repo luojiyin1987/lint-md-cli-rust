@@ -8,12 +8,6 @@ The expanded differential corpus intentionally records observable differences in
 
 The reference and Rust implementation disagree on the diagnostic column, fixed output and whether a full-width digit remains after fixing. The case remains in the corpus so either implementation changing its BOM behavior invalidates the baseline.
 
-## Unmatched inline delimiters
-
-- `no-full-width-number/unmatched-backtick`
-
-The Rust text scanner protects everything after an unmatched backtick run. The TypeScript Markdown parser treats the unmatched delimiter as text and still reports and fixes both full-width-number runs.
-
 ## Blockquote node boundaries
 
 - `no-multiple-space-blockquote/crlf`
