@@ -72,6 +72,7 @@ struct BlockquoteFinding {
     line: usize,
     column: usize,
     range: Range<usize>,
+    marker_offset: usize,
     spacing_delta: Option<usize>,
 }
 
@@ -171,14 +172,20 @@ fn collect_mdast_findings(
         }
         Node::Blockquote(blockquote) if inspect_blockquotes => {
             if let Some(position) = &blockquote.position {
+                let marker_offset = blockquote_marker_offset(
+                    input,
+                    position.start.offset,
+                    position.end.offset,
+                );
                 let spacing_delta = blockquote
                     .children
                     .first()
-                    .map(|_| blockquote_spacing_delta(input, position.start.offset));
+                    .map(|_| blockquote_spacing_delta(input, marker_offset));
                 analysis.blockquotes.push(BlockquoteFinding {
                     line: position.start.line,
-                    column: position.start.column,
+                    column: source_column(input, marker_offset),
                     range: position.start.offset..position.end.offset,
+                    marker_offset,
                     spacing_delta,
                 });
             }
@@ -198,6 +205,23 @@ fn collect_mdast_findings(
             );
         }
     }
+}
+
+fn blockquote_marker_offset(input: &str, start: usize, end: usize) -> usize {
+    input[start..end]
+        .char_indices()
+        .take_while(|(_, ch)| !matches!(ch, '\r' | '\n'))
+        .find_map(|(offset, ch)| (ch == '>').then_some(start + offset))
+        .unwrap_or(start)
+}
+
+fn source_column(input: &str, offset: usize) -> usize {
+    let line_start = input[..offset]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| matches!(ch, '\r' | '\n').then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    input[line_start..offset].chars().count() + 1
 }
 
 fn blockquote_spacing_delta(input: &str, marker_offset: usize) -> usize {
@@ -301,8 +325,8 @@ fn mdast_edits(input: &str, analysis: &MdastAnalysis) -> Vec<TextEdit> {
                     continue;
                 }
 
-                let start = finding.range.start.saturating_add(1).min(input.len());
-                let end = finding.range.start.saturating_add(delta).min(input.len());
+                let start = finding.marker_offset.saturating_add(1).min(input.len());
+                let end = finding.marker_offset.saturating_add(delta).min(input.len());
                 edits.push(TextEdit {
                     range: start..end.max(start),
                     replacement: " ",
@@ -972,6 +996,19 @@ mod tests {
     }
 
     #[test]
+    fn fixes_indented_blockquote_at_marker_column() {
+        let input = "  >   text\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "  > text\n");
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|item| item.rule_id == RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE)
+            .expect("indented blockquote is diagnosed");
+        assert_eq!((diagnostic.line, diagnostic.column), (1, 3));
+    }
+
+    #[test]
     fn fixes_nested_blockquote_marker_once() {
         let input = ">> text\n";
         let result = lint_markdown(input);
@@ -997,6 +1034,18 @@ mod tests {
             .expect("empty blockquote is diagnosed");
         assert_eq!((diagnostic.line, diagnostic.column), (1, 1));
         assert!(diagnostic.fixable);
+    }
+
+    #[test]
+    fn locates_indented_empty_blockquote_at_marker() {
+        let result = lint_markdown("  >   \n");
+        assert_eq!(result.fixed, "");
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|item| item.rule_id == RULE_NO_EMPTY_BLOCKQUOTE)
+            .expect("indented empty blockquote is diagnosed");
+        assert_eq!((diagnostic.line, diagnostic.column), (1, 3));
     }
 
     #[test]
