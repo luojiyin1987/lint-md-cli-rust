@@ -302,11 +302,7 @@ fn mdast_edits(input: &str, analysis: &MdastAnalysis) -> Vec<TextEdit> {
                 }
 
                 let start = finding.range.start.saturating_add(1).min(input.len());
-                let end = finding
-                    .range
-                    .start
-                    .saturating_add(delta)
-                    .min(input.len());
+                let end = finding.range.start.saturating_add(delta).min(input.len());
                 edits.push(TextEdit {
                     range: start..end.max(start),
                     replacement: " ",
@@ -593,16 +589,14 @@ fn blockquote_diagnostics_by_line(analysis: &MdastAnalysis) -> HashMap<usize, Ve
                 severity: Severity::Error,
                 fixable: true,
             }),
-            Some(delta) if delta != 2 => {
-                Some(Diagnostic {
-                    rule_id: RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE,
-                    message: "Use exactly one space after the blockquote marker.",
-                    line: finding.line,
-                    column: finding.column,
-                    severity: Severity::Error,
-                    fixable: true,
-                })
-            }
+            Some(delta) if delta != 2 => Some(Diagnostic {
+                rule_id: RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE,
+                message: "Use exactly one space after the blockquote marker.",
+                line: finding.line,
+                column: finding.column,
+                severity: Severity::Error,
+                fixable: true,
+            }),
             _ => None,
         };
 
