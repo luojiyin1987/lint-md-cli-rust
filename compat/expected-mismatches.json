@@ -1,1 +1,43 @@
-{}
+{
+  "no-full-width-number/emoji-prefix": [
+    "locations"
+  ],
+  "no-full-width-number/bom-prefix": [
+    "exit-code",
+    "fixed-output",
+    "locations"
+  ],
+  "no-full-width-number/unmatched-backtick": [
+    "diagnostic-count",
+    "fixability",
+    "fixed-output",
+    "locations",
+    "rule-ids"
+  ],
+  "no-empty-inline-code/unicode-prefix": [
+    "locations"
+  ],
+  "no-empty-inline-code/emoji-prefix": [
+    "locations"
+  ],
+  "no-empty-inline-code/combining-prefix": [
+    "locations"
+  ],
+  "no-multiple-space-blockquote/crlf": [
+    "diagnostic-count",
+    "fixability",
+    "fixed-output",
+    "locations",
+    "rule-ids"
+  ],
+  "no-multiple-space-blockquote/in-list": [
+    "diagnostic-count",
+    "fixability",
+    "fixed-output",
+    "locations",
+    "rule-ids"
+  ],
+  "no-multiple-blank-lines/mixed-endings": [
+    "exit-code"
+  ]
+}
