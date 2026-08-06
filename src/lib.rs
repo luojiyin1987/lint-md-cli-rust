@@ -240,9 +240,7 @@ fn may_contain_problematic_blockquote(input: &str) -> bool {
         }
 
         let content = after + 1;
-        if content >= bytes.len()
-            || matches!(bytes[content], b' ' | b'\t' | b'\r' | b'\n')
-        {
+        if content >= bytes.len() || matches!(bytes[content], b' ' | b'\t' | b'\r' | b'\n') {
             return true;
         }
 
@@ -536,11 +534,7 @@ fn fix_blank_lines(input: &str) -> String {
     output
 }
 
-fn diagnose_line_rules(
-    input: &str,
-    analysis: &MdastAnalysis,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn diagnose_line_rules(input: &str, analysis: &MdastAnalysis, diagnostics: &mut Vec<Diagnostic>) {
     let mut active_fence: Option<Fence> = None;
     let mut blockquotes_by_line = blockquote_diagnostics_by_line(analysis);
 
@@ -578,9 +572,7 @@ fn diagnose_line_rules(
     }
 }
 
-fn blockquote_diagnostics_by_line(
-    analysis: &MdastAnalysis,
-) -> HashMap<usize, Vec<Diagnostic>> {
+fn blockquote_diagnostics_by_line(analysis: &MdastAnalysis) -> HashMap<usize, Vec<Diagnostic>> {
     let mut by_line = HashMap::<usize, Vec<Diagnostic>>::new();
 
     for finding in &analysis.blockquotes {
