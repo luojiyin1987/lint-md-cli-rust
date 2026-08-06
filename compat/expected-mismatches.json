@@ -4,20 +4,6 @@
     "fixed-output",
     "locations"
   ],
-  "no-multiple-space-blockquote/crlf": [
-    "diagnostic-count",
-    "fixability",
-    "fixed-output",
-    "locations",
-    "rule-ids"
-  ],
-  "no-multiple-space-blockquote/in-list": [
-    "diagnostic-count",
-    "fixability",
-    "fixed-output",
-    "locations",
-    "rule-ids"
-  ],
   "no-multiple-blank-lines/mixed-endings": [
     "exit-code"
   ]
