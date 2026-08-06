@@ -172,11 +172,8 @@ fn collect_mdast_findings(
         }
         Node::Blockquote(blockquote) if inspect_blockquotes => {
             if let Some(position) = &blockquote.position {
-                let marker_offset = blockquote_marker_offset(
-                    input,
-                    position.start.offset,
-                    position.end.offset,
-                );
+                let marker_offset =
+                    blockquote_marker_offset(input, position.start.offset, position.end.offset);
                 let spacing_delta = blockquote
                     .children
                     .first()
