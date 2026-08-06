@@ -2,17 +2,6 @@
 
 The expanded differential corpus intentionally records observable differences instead of removing the cases or weakening comparisons. These baselines are test expectations, not declarations that the Rust behavior is preferable.
 
-## Source column models
-
-The TypeScript reference and Rust prototype do not currently use the same column metric for every rule:
-
-- `no-full-width-number/emoji-prefix`: TypeScript reports JavaScript UTF-16-oriented columns while the scanner counts Rust `char` values.
-- `no-empty-inline-code/unicode-prefix`
-- `no-empty-inline-code/emoji-prefix`
-- `no-empty-inline-code/combining-prefix`
-
-The inline-code cases expose that `markdown-rs` mdast columns currently behave like byte-oriented source offsets for non-ASCII prefixes, while the TypeScript reference reports character-oriented positions.
-
 ## BOM handling
 
 - `no-full-width-number/bom-prefix`

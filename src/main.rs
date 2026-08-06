@@ -1,4 +1,6 @@
-use lint_md_cli_rust::{json_escape, lint_markdown, Diagnostic, LintResult};
+use lint_md_cli_rust::{
+    json_escape, lint_markdown, Diagnostic, LintResult, RULE_NO_EMPTY_INLINE_CODE,
+};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -62,8 +64,8 @@ fn run() -> Result<u8, String> {
     }
 
     match options.format {
-        OutputFormat::Text => emit_text(&path, &result, options.fix, &options.source)?,
-        OutputFormat::Json => emit_json(&path, &result, options.fix),
+        OutputFormat::Text => emit_text(&path, &input, &result, options.fix, &options.source)?,
+        OutputFormat::Json => emit_json(&path, &input, &result, options.fix),
     }
 
     let remaining = if options.fix {
@@ -158,7 +160,13 @@ fn write_fixed(source: &Source, fixed: &str) -> Result<(), String> {
     }
 }
 
-fn emit_text(path: &str, result: &LintResult, fix: bool, source: &Source) -> Result<(), String> {
+fn emit_text(
+    path: &str,
+    input: &str,
+    result: &LintResult,
+    fix: bool,
+    source: &Source,
+) -> Result<(), String> {
     if fix && matches!(source, Source::Stdin) {
         io::stdout()
             .write_all(result.fixed.as_bytes())
@@ -168,13 +176,13 @@ fn emit_text(path: &str, result: &LintResult, fix: bool, source: &Source) -> Res
             .iter()
             .filter(|diagnostic| !diagnostic.fixable)
         {
-            eprintln!("{}", format_diagnostic(path, diagnostic));
+            eprintln!("{}", format_diagnostic(path, input, diagnostic));
         }
         return Ok(());
     }
 
     for diagnostic in &result.diagnostics {
-        println!("{}", format_diagnostic(path, diagnostic));
+        println!("{}", format_diagnostic(path, input, diagnostic));
     }
     if fix && result.changed {
         println!("fixed {path}");
@@ -185,12 +193,12 @@ fn emit_text(path: &str, result: &LintResult, fix: bool, source: &Source) -> Res
     Ok(())
 }
 
-fn format_diagnostic(path: &str, diagnostic: &Diagnostic) -> String {
+fn format_diagnostic(path: &str, input: &str, diagnostic: &Diagnostic) -> String {
     format!(
         "{}:{}:{}: {} [{}] {}{}",
         path,
         diagnostic.line,
-        diagnostic.column,
+        typescript_column(input, diagnostic),
         diagnostic.severity,
         diagnostic.rule_id,
         diagnostic.message,
@@ -198,7 +206,7 @@ fn format_diagnostic(path: &str, diagnostic: &Diagnostic) -> String {
     )
 }
 
-fn emit_json(path: &str, result: &LintResult, include_fixed: bool) {
+fn emit_json(path: &str, input: &str, result: &LintResult, include_fixed: bool) {
     print!(
         "{{\"path\":\"{}\",\"changed\":{},\"diagnostics\":[",
         json_escape(path),
@@ -213,7 +221,7 @@ fn emit_json(path: &str, result: &LintResult, include_fixed: bool) {
             json_escape(diagnostic.rule_id),
             json_escape(diagnostic.message),
             diagnostic.line,
-            diagnostic.column,
+            typescript_column(input, diagnostic),
             diagnostic.severity,
             diagnostic.fixable
         );
@@ -223,6 +231,57 @@ fn emit_json(path: &str, result: &LintResult, include_fixed: bool) {
         print!(",\"fixedContent\":\"{}\"", json_escape(&result.fixed));
     }
     println!("}}");
+}
+
+fn typescript_column(input: &str, diagnostic: &Diagnostic) -> usize {
+    let Some(line) = source_line(input, diagnostic.line) else {
+        return diagnostic.column;
+    };
+
+    let byte_index = if diagnostic.rule_id == RULE_NO_EMPTY_INLINE_CODE {
+        diagnostic.column.saturating_sub(1).min(line.len())
+    } else {
+        line.char_indices()
+            .nth(diagnostic.column.saturating_sub(1))
+            .map_or(line.len(), |(index, _)| index)
+    };
+
+    if !line.is_char_boundary(byte_index) {
+        return diagnostic.column;
+    }
+
+    line[..byte_index].encode_utf16().count() + 1
+}
+
+fn source_line(input: &str, target_line: usize) -> Option<&str> {
+    if target_line == 0 {
+        return None;
+    }
+
+    let bytes = input.as_bytes();
+    let mut start = 0usize;
+    let mut line_number = 1usize;
+
+    loop {
+        let mut end = start;
+        while end < bytes.len() && !matches!(bytes[end], b'\r' | b'\n') {
+            end += 1;
+        }
+
+        if line_number == target_line {
+            return Some(&input[start..end]);
+        }
+        if end == bytes.len() {
+            return None;
+        }
+
+        start = if bytes[end] == b'\r' && end + 1 < bytes.len() && bytes[end + 1] == b'\n' {
+            end + 2
+        } else {
+            end + 1
+        };
+        line_number += 1;
+    }
 }
 
 fn print_help() {
@@ -258,5 +317,35 @@ mod tests {
         let error = parse_args(vec!["--stdin".to_owned(), "README.md".to_owned()])
             .expect_err("input sources conflict");
         assert!(error.contains("cannot be combined"));
+    }
+
+    #[test]
+    fn converts_scanner_and_mdast_columns_to_utf16() {
+        let cases = [
+            ("😀１２\n", "no-full-width-number", 3),
+            ("中文 ` ` after\n", RULE_NO_EMPTY_INLINE_CODE, 4),
+            ("😀 ` ` after\n", RULE_NO_EMPTY_INLINE_CODE, 4),
+            ("e\u{301} ` ` after\n", RULE_NO_EMPTY_INLINE_CODE, 4),
+        ];
+
+        for (input, rule_id, expected_column) in cases {
+            let result = lint_markdown(input);
+            let diagnostic = result
+                .diagnostics
+                .iter()
+                .find(|item| item.rule_id == rule_id)
+                .expect("fixture produces the target diagnostic");
+            assert_eq!(typescript_column(input, diagnostic), expected_column);
+        }
+    }
+
+    #[test]
+    fn finds_source_lines_across_line_ending_styles() {
+        let input = "first\r\nsecond\rthird\nfourth";
+        assert_eq!(source_line(input, 1), Some("first"));
+        assert_eq!(source_line(input, 2), Some("second"));
+        assert_eq!(source_line(input, 3), Some("third"));
+        assert_eq!(source_line(input, 4), Some("fourth"));
+        assert_eq!(source_line(input, 5), None);
     }
 }
