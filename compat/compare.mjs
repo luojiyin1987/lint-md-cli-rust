@@ -2,14 +2,24 @@ import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { edgeCases } from "./edge-cases.mjs";
 import { runReference } from "./reference.mjs";
 
 const compatDir = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(compatDir, "..");
-const manifest = JSON.parse(readFileSync(join(compatDir, "fixtures.json"), "utf8"));
+const fileManifest = JSON.parse(
+  readFileSync(join(compatDir, "fixtures.json"), "utf8")
+);
 const expected = JSON.parse(
   readFileSync(join(compatDir, "expected-mismatches.json"), "utf8")
 );
+const fixtures = [
+  ...fileManifest.map((fixture) => ({
+    ...fixture,
+    content: readFileSync(join(compatDir, fixture.path), "utf8")
+  })),
+  ...edgeCases
+];
 
 const defaultBinary = join(
   rootDir,
@@ -119,7 +129,15 @@ function mismatchCategories(reference, rust) {
 let failed = false;
 let exactMatches = 0;
 let acceptedMismatches = 0;
-const fixtureIds = new Set(manifest.map((fixture) => fixture.id));
+const fixtureIds = new Set(fixtures.map((fixture) => fixture.id));
+
+if (fixtureIds.size !== fixtures.length) {
+  const seen = new Set();
+  const duplicates = fixtures
+    .map((fixture) => fixture.id)
+    .filter((id) => seen.has(id) || !seen.add(id));
+  throw new Error(`duplicate fixture IDs: ${[...new Set(duplicates)].join(", ")}`);
+}
 
 for (const baselineId of Object.keys(expected)) {
   if (!fixtureIds.has(baselineId)) {
@@ -128,10 +146,9 @@ for (const baselineId of Object.keys(expected)) {
   }
 }
 
-for (const fixture of manifest) {
-  const content = readFileSync(join(compatDir, fixture.path), "utf8");
-  const reference = runReference(content);
-  const rust = runRust(content);
+for (const fixture of fixtures) {
+  const reference = runReference(fixture.content);
+  const rust = runRust(fixture.content);
   const actual = mismatchCategories(reference, rust);
   const baseline = [...(expected[fixture.id] ?? [])].sort();
 
@@ -155,7 +172,7 @@ for (const fixture of manifest) {
 }
 
 console.log(
-  `\n${manifest.length} fixtures: ${exactMatches} exact, ${acceptedMismatches} known mismatches`
+  `\n${fixtures.length} fixtures: ${exactMatches} exact, ${acceptedMismatches} known mismatches`
 );
 
 if (failed) process.exit(1);

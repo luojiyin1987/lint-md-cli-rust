@@ -2,6 +2,13 @@
 
 This directory runs the TypeScript `@lint-md/core` implementation and the Rust prototype over the same fixtures, normalizes their observable results, and rejects unrecorded compatibility differences.
 
+The corpus has two forms:
+
+- `fixtures.json` points to small file-backed regression fixtures that are easy to inspect directly.
+- `edge-cases.mjs` stores exact string-backed cases for BOM, CR-only and mixed line endings, combining characters, emoji, delimiter widths, nesting and interactions between fixes.
+
+Fixture IDs must be unique across both sources. The comparison fails on duplicate IDs, new mismatch categories, resolved mismatch baselines and stale baseline entries.
+
 ## Prepare the pinned TypeScript reference
 
 Run from the repository root:
