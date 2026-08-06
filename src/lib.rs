@@ -72,7 +72,7 @@ struct BlockquoteFinding {
     line: usize,
     column: usize,
     range: Range<usize>,
-    first_child_column: Option<usize>,
+    spacing_delta: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -133,6 +133,7 @@ fn analyze_mdast(input: &str) -> MdastAnalysis {
         .expect("CommonMark parsing without MDX extensions should not fail");
     let mut analysis = MdastAnalysis::default();
     collect_mdast_findings(
+        input,
         &tree,
         inspect_empty_inline,
         inspect_inline_ranges,
@@ -152,6 +153,7 @@ fn analyze_mdast(input: &str) -> MdastAnalysis {
 }
 
 fn collect_mdast_findings(
+    input: &str,
     node: &Node,
     inspect_empty_inline: bool,
     inspect_inline_ranges: bool,
@@ -169,16 +171,15 @@ fn collect_mdast_findings(
         }
         Node::Blockquote(blockquote) if inspect_blockquotes => {
             if let Some(position) = &blockquote.position {
-                let first_child_column = blockquote
+                let spacing_delta = blockquote
                     .children
                     .first()
-                    .and_then(Node::position)
-                    .map(|position| position.start.column);
+                    .map(|_| blockquote_spacing_delta(input, position.start.offset));
                 analysis.blockquotes.push(BlockquoteFinding {
                     line: position.start.line,
                     column: position.start.column,
                     range: position.start.offset..position.end.offset,
-                    first_child_column,
+                    spacing_delta,
                 });
             }
         }
@@ -188,6 +189,7 @@ fn collect_mdast_findings(
     if let Some(children) = node.children() {
         for child in children {
             collect_mdast_findings(
+                input,
                 child,
                 inspect_empty_inline,
                 inspect_inline_ranges,
@@ -196,6 +198,17 @@ fn collect_mdast_findings(
             );
         }
     }
+}
+
+fn blockquote_spacing_delta(input: &str, marker_offset: usize) -> usize {
+    let bytes = input.as_bytes();
+    let mut cursor = marker_offset.saturating_add(1).min(bytes.len());
+
+    while cursor < bytes.len() && bytes[cursor] == b' ' {
+        cursor += 1;
+    }
+
+    cursor.saturating_sub(marker_offset)
 }
 
 fn collect_inline_code_finding(
@@ -278,27 +291,22 @@ fn mdast_edits(input: &str, analysis: &MdastAnalysis) -> Vec<TextEdit> {
     }
 
     for finding in &analysis.blockquotes {
-        match finding.first_child_column {
+        match finding.spacing_delta {
             None => edits.push(TextEdit {
                 range: finding.range.clone(),
                 replacement: "",
             }),
-            Some(first_child_column) => {
-                let delta = first_child_column as isize - finding.column as isize;
+            Some(delta) => {
                 if delta == 2 {
                     continue;
                 }
 
                 let start = finding.range.start.saturating_add(1).min(input.len());
-                let end = if delta > 0 {
-                    finding
-                        .range
-                        .start
-                        .saturating_add(delta as usize)
-                        .min(input.len())
-                } else {
-                    start.saturating_add(1).min(input.len())
-                };
+                let end = finding
+                    .range
+                    .start
+                    .saturating_add(delta)
+                    .min(input.len());
                 edits.push(TextEdit {
                     range: start..end.max(start),
                     replacement: " ",
@@ -576,7 +584,7 @@ fn blockquote_diagnostics_by_line(analysis: &MdastAnalysis) -> HashMap<usize, Ve
     let mut by_line = HashMap::<usize, Vec<Diagnostic>>::new();
 
     for finding in &analysis.blockquotes {
-        let diagnostic = match finding.first_child_column {
+        let diagnostic = match finding.spacing_delta {
             None => Some(Diagnostic {
                 rule_id: RULE_NO_EMPTY_BLOCKQUOTE,
                 message: "Blockquote content must not be empty.",
@@ -585,9 +593,7 @@ fn blockquote_diagnostics_by_line(analysis: &MdastAnalysis) -> HashMap<usize, Ve
                 severity: Severity::Error,
                 fixable: true,
             }),
-            Some(first_child_column)
-                if first_child_column as isize - finding.column as isize != 2 =>
-            {
+            Some(delta) if delta != 2 => {
                 Some(Diagnostic {
                     rule_id: RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE,
                     message: "Use exactly one space after the blockquote marker.",
