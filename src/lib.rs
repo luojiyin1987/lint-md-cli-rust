@@ -60,26 +60,52 @@ struct SourceLine<'a> {
     protected: bool,
 }
 
+#[derive(Debug, Clone)]
+struct EmptyInlineCodeFinding {
+    line: usize,
+    column: usize,
+    range: Range<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct BlockquoteFinding {
+    line: usize,
+    column: usize,
+    range: Range<usize>,
+    first_child_column: Option<usize>,
+}
+
+#[derive(Debug, Default)]
+struct MdastAnalysis {
+    inline_code_ranges: Vec<Range<usize>>,
+    empty_inline_code: Vec<EmptyInlineCodeFinding>,
+    blockquotes: Vec<BlockquoteFinding>,
+}
+
+#[derive(Debug, Clone)]
+struct TextEdit {
+    range: Range<usize>,
+    replacement: &'static str,
+}
+
 /// Lint Markdown using the prototype rule set.
 ///
-/// Diagnostics describe the original input. Empty inline-code fixes use mdast
-/// source ranges; scanner fixes then repeat until stable so interacting rules
-/// converge on the TypeScript reference output.
+/// Diagnostics describe the original input. Rules that depend on Markdown
+/// structure share one mdast parse, while ordinary clean documents stay on the
+/// scanner fast path. Fixes repeat until interacting rules become stable.
 pub fn lint_markdown(input: &str) -> LintResult {
+    let analysis = analyze_mdast(input);
     let mut diagnostics = Vec::new();
 
     diagnose_blank_lines(input, &mut diagnostics);
-    diagnose_line_rules(input, &mut diagnostics);
-    let inline_code_removals = diagnose_empty_inline_code(input, &mut diagnostics);
+    diagnose_line_rules(input, &analysis, &mut diagnostics);
+    diagnose_empty_inline_code(&analysis, &mut diagnostics);
 
-    let mut fixed = apply_removals(input, &inline_code_removals);
-    fixed = fix_line_rules(&fixed);
-    fixed = fix_blank_lines(&fixed);
-
+    let mut fixed = fix_once(input, &analysis);
     if fixed != input {
         for _ in 0..3 {
-            let mut next = fix_line_rules(&fixed);
-            next = fix_blank_lines(&next);
+            let next_analysis = analyze_mdast(&fixed);
+            let next = fix_once(&fixed, &next_analysis);
             if next == fixed {
                 break;
             }
@@ -92,6 +118,233 @@ pub fn lint_markdown(input: &str) -> LintResult {
         changed: fixed != input,
         fixed,
     }
+}
+
+fn analyze_mdast(input: &str) -> MdastAnalysis {
+    let inspect_empty_inline = may_contain_whitespace_only_inline_code(input);
+    let inspect_inline_ranges = input.contains('`') && input.chars().any(is_full_width_digit);
+    let inspect_blockquotes = may_contain_problematic_blockquote(input);
+
+    if !inspect_empty_inline && !inspect_inline_ranges && !inspect_blockquotes {
+        return MdastAnalysis::default();
+    }
+
+    let tree = to_mdast(input, &ParseOptions::default())
+        .expect("CommonMark parsing without MDX extensions should not fail");
+    let mut analysis = MdastAnalysis::default();
+    collect_mdast_findings(
+        &tree,
+        inspect_empty_inline,
+        inspect_inline_ranges,
+        inspect_blockquotes,
+        &mut analysis,
+    );
+    analysis
+        .inline_code_ranges
+        .sort_unstable_by_key(|range| range.start);
+    analysis
+        .empty_inline_code
+        .sort_unstable_by_key(|finding| finding.range.start);
+    analysis
+        .blockquotes
+        .sort_unstable_by_key(|finding| finding.range.start);
+    analysis
+}
+
+fn collect_mdast_findings(
+    node: &Node,
+    inspect_empty_inline: bool,
+    inspect_inline_ranges: bool,
+    inspect_blockquotes: bool,
+    analysis: &mut MdastAnalysis,
+) {
+    match node {
+        Node::InlineCode(inline_code) => {
+            collect_inline_code_finding(
+                inline_code,
+                inspect_empty_inline,
+                inspect_inline_ranges,
+                analysis,
+            );
+        }
+        Node::Blockquote(blockquote) if inspect_blockquotes => {
+            if let Some(position) = &blockquote.position {
+                let first_child_column = blockquote
+                    .children
+                    .first()
+                    .and_then(Node::position)
+                    .map(|position| position.start.column);
+                analysis.blockquotes.push(BlockquoteFinding {
+                    line: position.start.line,
+                    column: position.start.column,
+                    range: position.start.offset..position.end.offset,
+                    first_child_column,
+                });
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_mdast_findings(
+                child,
+                inspect_empty_inline,
+                inspect_inline_ranges,
+                inspect_blockquotes,
+                analysis,
+            );
+        }
+    }
+}
+
+fn collect_inline_code_finding(
+    inline_code: &InlineCode,
+    inspect_empty_inline: bool,
+    inspect_inline_ranges: bool,
+    analysis: &mut MdastAnalysis,
+) {
+    let Some(position) = &inline_code.position else {
+        return;
+    };
+    let range = position.start.offset..position.end.offset;
+
+    if inspect_inline_ranges {
+        analysis.inline_code_ranges.push(range.clone());
+    }
+    if inspect_empty_inline && inline_code.value.trim().is_empty() {
+        analysis.empty_inline_code.push(EmptyInlineCodeFinding {
+            line: position.start.line,
+            column: position.start.column,
+            range,
+        });
+    }
+}
+
+fn may_contain_problematic_blockquote(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] != b'>' {
+            index += 1;
+            continue;
+        }
+
+        let after = index + 1;
+        if after >= bytes.len() || matches!(bytes[after], b'\r' | b'\n' | b'\t') {
+            return true;
+        }
+        if bytes[after] != b' ' {
+            return true;
+        }
+
+        let content = after + 1;
+        if content >= bytes.len()
+            || matches!(bytes[content], b' ' | b'\t' | b'\r' | b'\n')
+        {
+            return true;
+        }
+
+        index += 1;
+    }
+
+    false
+}
+
+fn fix_once(input: &str, analysis: &MdastAnalysis) -> String {
+    let edits = mdast_edits(input, analysis);
+    let after_mdast = apply_text_edits(input, &edits);
+
+    let owned_ranges;
+    let inline_code_ranges = if after_mdast == input {
+        &analysis.inline_code_ranges
+    } else {
+        owned_ranges = full_width_inline_code_ranges(&after_mdast);
+        &owned_ranges
+    };
+
+    let mut fixed = fix_full_width_numbers_document(&after_mdast, inline_code_ranges);
+    fixed = fix_blank_lines(&fixed);
+    fixed
+}
+
+fn mdast_edits(input: &str, analysis: &MdastAnalysis) -> Vec<TextEdit> {
+    let mut edits = Vec::new();
+
+    for finding in &analysis.empty_inline_code {
+        edits.push(TextEdit {
+            range: finding.range.clone(),
+            replacement: "",
+        });
+    }
+
+    for finding in &analysis.blockquotes {
+        match finding.first_child_column {
+            None => edits.push(TextEdit {
+                range: finding.range.clone(),
+                replacement: "",
+            }),
+            Some(first_child_column) => {
+                let delta = first_child_column as isize - finding.column as isize;
+                if delta == 2 {
+                    continue;
+                }
+
+                let start = finding.range.start.saturating_add(1).min(input.len());
+                let end = if delta > 0 {
+                    finding
+                        .range
+                        .start
+                        .saturating_add(delta as usize)
+                        .min(input.len())
+                } else {
+                    start.saturating_add(1).min(input.len())
+                };
+                edits.push(TextEdit {
+                    range: start..end.max(start),
+                    replacement: " ",
+                });
+            }
+        }
+    }
+
+    edits
+}
+
+fn apply_text_edits(input: &str, edits: &[TextEdit]) -> String {
+    if edits.is_empty() {
+        return input.to_owned();
+    }
+
+    let mut edits = edits.to_vec();
+    edits.sort_unstable_by(|left, right| {
+        left.range
+            .start
+            .cmp(&right.range.start)
+            .then_with(|| right.range.end.cmp(&left.range.end))
+    });
+
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+
+    for edit in edits {
+        if edit.range.start < cursor
+            || edit.range.start > edit.range.end
+            || edit.range.end > input.len()
+            || !input.is_char_boundary(edit.range.start)
+            || !input.is_char_boundary(edit.range.end)
+        {
+            continue;
+        }
+
+        output.push_str(&input[cursor..edit.range.start]);
+        output.push_str(edit.replacement);
+        cursor = edit.range.end;
+    }
+
+    output.push_str(&input[cursor..]);
+    output
 }
 
 fn parse_lines(input: &str) -> Vec<SourceLine<'_>> {
@@ -283,9 +536,13 @@ fn fix_blank_lines(input: &str) -> String {
     output
 }
 
-fn diagnose_line_rules(input: &str, diagnostics: &mut Vec<Diagnostic>) {
+fn diagnose_line_rules(
+    input: &str,
+    analysis: &MdastAnalysis,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let mut active_fence: Option<Fence> = None;
-    let inline_code_ranges = full_width_inline_code_ranges(input);
+    let mut blockquotes_by_line = blockquote_diagnostics_by_line(analysis);
 
     for line in parse_lines(input) {
         let candidate = parse_fence(line.content.trim_start_matches([' ', '\t']));
@@ -303,64 +560,73 @@ fn diagnose_line_rules(input: &str, diagnostics: &mut Vec<Diagnostic>) {
             continue;
         }
 
+        if let Some(mut blockquote_diagnostics) = blockquotes_by_line.remove(&line.number) {
+            diagnostics.append(&mut blockquote_diagnostics);
+        }
+
         if line.content.trim_matches([' ', '\t']).is_empty() {
             continue;
         }
 
-        diagnose_empty_blockquote(line.content, line.number, diagnostics);
-        diagnose_blockquote_spacing(line.content, line.number, diagnostics);
         diagnose_full_width_numbers(
             line.content,
             line.start,
             line.number,
-            &inline_code_ranges,
+            &analysis.inline_code_ranges,
             diagnostics,
         );
     }
 }
 
-fn fix_line_rules(input: &str) -> String {
-    let mut fixed = String::with_capacity(input.len());
-    let mut active_fence: Option<Fence> = None;
-    let inline_code_ranges = full_width_inline_code_ranges(input);
+fn blockquote_diagnostics_by_line(
+    analysis: &MdastAnalysis,
+) -> HashMap<usize, Vec<Diagnostic>> {
+    let mut by_line = HashMap::<usize, Vec<Diagnostic>>::new();
 
-    for line in parse_lines(input) {
-        let candidate = parse_fence(line.content.trim_start_matches([' ', '\t']));
-        if let Some(current) = active_fence {
-            fixed.push_str(line.content);
-            fixed.push_str(line.ending);
-            if candidate
-                .is_some_and(|fence| fence.marker == current.marker && fence.width >= current.width)
+    for finding in &analysis.blockquotes {
+        let diagnostic = match finding.first_child_column {
+            None => Some(Diagnostic {
+                rule_id: RULE_NO_EMPTY_BLOCKQUOTE,
+                message: "Blockquote content must not be empty.",
+                line: finding.line,
+                column: finding.column,
+                severity: Severity::Error,
+                fixable: true,
+            }),
+            Some(first_child_column)
+                if first_child_column as isize - finding.column as isize != 2 =>
             {
-                active_fence = None;
+                Some(Diagnostic {
+                    rule_id: RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE,
+                    message: "Use exactly one space after the blockquote marker.",
+                    line: finding.line,
+                    column: finding.column,
+                    severity: Severity::Error,
+                    fixable: true,
+                })
             }
-            continue;
-        }
+            _ => None,
+        };
 
-        if let Some(opening) = candidate {
-            active_fence = Some(opening);
-            fixed.push_str(line.content);
-            fixed.push_str(line.ending);
-            continue;
+        if let Some(diagnostic) = diagnostic {
+            by_line.entry(finding.line).or_default().push(diagnostic);
         }
-
-        if line.content.trim_matches([' ', '\t']).is_empty() {
-            fixed.push_str(line.content);
-            fixed.push_str(line.ending);
-            continue;
-        }
-
-        let mut transformed = fix_full_width_numbers(line.content, line.start, &inline_code_ranges);
-        transformed = fix_empty_blockquote(&transformed);
-        if !transformed.is_empty() {
-            transformed = fix_blockquote_spacing(&transformed);
-        }
-
-        fixed.push_str(&transformed);
-        fixed.push_str(line.ending);
     }
 
-    fixed
+    by_line
+}
+
+fn diagnose_empty_inline_code(analysis: &MdastAnalysis, diagnostics: &mut Vec<Diagnostic>) {
+    for finding in &analysis.empty_inline_code {
+        diagnostics.push(Diagnostic {
+            rule_id: RULE_NO_EMPTY_INLINE_CODE,
+            message: "Inline code content must not be empty.",
+            line: finding.line,
+            column: finding.column,
+            severity: Severity::Error,
+            fixable: true,
+        });
+    }
 }
 
 fn parse_fence(line: &str) -> Option<Fence> {
@@ -372,98 +638,8 @@ fn parse_fence(line: &str) -> Option<Fence> {
     (width >= 3).then_some(Fence { marker, width })
 }
 
-fn leading_whitespace_bytes(line: &str) -> usize {
-    line.char_indices()
-        .find_map(|(index, ch)| (!matches!(ch, ' ' | '\t')).then_some(index))
-        .unwrap_or(line.len())
-}
-
 fn char_column(line: &str, byte_index: usize) -> usize {
     line[..byte_index].chars().count() + 1
-}
-
-fn blockquote_parts(line: &str) -> Option<(usize, &str)> {
-    let prefix = leading_whitespace_bytes(line);
-    line[prefix..]
-        .strip_prefix('>')
-        .map(|after_marker| (prefix, after_marker))
-}
-
-fn diagnose_empty_blockquote(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
-    if let Some((marker_index, after_marker)) = blockquote_parts(line) {
-        if after_marker.trim().is_empty() {
-            diagnostics.push(Diagnostic {
-                rule_id: RULE_NO_EMPTY_BLOCKQUOTE,
-                message: "Blockquote content must not be empty.",
-                line: line_number,
-                column: char_column(line, marker_index),
-                severity: Severity::Error,
-                fixable: true,
-            });
-        }
-    }
-}
-
-fn fix_empty_blockquote(line: &str) -> String {
-    if blockquote_parts(line).is_some_and(|(_, after_marker)| after_marker.trim().is_empty()) {
-        String::new()
-    } else {
-        line.to_owned()
-    }
-}
-
-fn diagnose_blockquote_spacing(line: &str, line_number: usize, diagnostics: &mut Vec<Diagnostic>) {
-    if let Some((marker_index, after_marker)) = blockquote_parts(line) {
-        if after_marker.trim().is_empty() {
-            return;
-        }
-        let spaces = after_marker.chars().take_while(|ch| *ch == ' ').count();
-        if spaces != 1 {
-            diagnostics.push(Diagnostic {
-                rule_id: RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE,
-                message: "Use exactly one space after the blockquote marker.",
-                line: line_number,
-                column: char_column(line, marker_index),
-                severity: Severity::Error,
-                fixable: true,
-            });
-        }
-    }
-}
-
-fn fix_blockquote_spacing(line: &str) -> String {
-    let Some((marker_index, after_marker)) = blockquote_parts(line) else {
-        return line.to_owned();
-    };
-    if after_marker.trim().is_empty() {
-        return line.to_owned();
-    }
-
-    let spaces = after_marker.chars().take_while(|ch| *ch == ' ').count();
-    if spaces == 1 {
-        return line.to_owned();
-    }
-
-    let consumed_bytes: usize = after_marker.chars().take(spaces).map(char::len_utf8).sum();
-    let mut output = String::with_capacity(line.len() - consumed_bytes + 1);
-    output.push_str(&line[..marker_index]);
-    output.push('>');
-    output.push(' ');
-    output.push_str(&after_marker[consumed_bytes..]);
-    output
-}
-
-fn diagnose_empty_inline_code(input: &str, diagnostics: &mut Vec<Diagnostic>) -> Vec<Range<usize>> {
-    if !may_contain_whitespace_only_inline_code(input) {
-        return Vec::new();
-    }
-
-    let tree = to_mdast(input, &ParseOptions::default())
-        .expect("CommonMark parsing without MDX extensions should not fail");
-    let mut removals = Vec::new();
-    collect_empty_inline_code(&tree, diagnostics, &mut removals);
-    removals.sort_unstable_by_key(|range| range.start);
-    removals
 }
 
 fn may_contain_whitespace_only_inline_code(input: &str) -> bool {
@@ -491,65 +667,6 @@ fn may_contain_whitespace_only_inline_code(input: &str) -> bool {
     }
 
     false
-}
-
-fn collect_empty_inline_code(
-    node: &Node,
-    diagnostics: &mut Vec<Diagnostic>,
-    removals: &mut Vec<Range<usize>>,
-) {
-    if let Node::InlineCode(inline_code) = node {
-        collect_empty_inline_code_node(inline_code, diagnostics, removals);
-    }
-
-    if let Some(children) = node.children() {
-        for child in children {
-            collect_empty_inline_code(child, diagnostics, removals);
-        }
-    }
-}
-
-fn collect_empty_inline_code_node(
-    inline_code: &InlineCode,
-    diagnostics: &mut Vec<Diagnostic>,
-    removals: &mut Vec<Range<usize>>,
-) {
-    if !inline_code.value.trim().is_empty() {
-        return;
-    }
-    let Some(position) = &inline_code.position else {
-        return;
-    };
-
-    diagnostics.push(Diagnostic {
-        rule_id: RULE_NO_EMPTY_INLINE_CODE,
-        message: "Inline code content must not be empty.",
-        line: position.start.line,
-        column: position.start.column,
-        severity: Severity::Error,
-        fixable: true,
-    });
-    removals.push(position.start.offset..position.end.offset);
-}
-
-fn apply_removals(input: &str, removals: &[Range<usize>]) -> String {
-    if removals.is_empty() {
-        return input.to_owned();
-    }
-
-    let removed_bytes: usize = removals.iter().map(|range| range.len()).sum();
-    let mut output = String::with_capacity(input.len().saturating_sub(removed_bytes));
-    let mut cursor = 0usize;
-
-    for range in removals {
-        debug_assert!(range.start >= cursor);
-        debug_assert!(range.end <= input.len());
-        output.push_str(&input[cursor..range.start]);
-        cursor = range.end;
-    }
-
-    output.push_str(&input[cursor..]);
-    output
 }
 
 fn full_width_inline_code_ranges(input: &str) -> Vec<Range<usize>> {
@@ -628,6 +745,41 @@ fn full_width_digit_run_starts(
         starts.push(start);
     }
     starts
+}
+
+fn fix_full_width_numbers_document(input: &str, inline_code_ranges: &[Range<usize>]) -> String {
+    let mut fixed = String::with_capacity(input.len());
+    let mut active_fence: Option<Fence> = None;
+
+    for line in parse_lines(input) {
+        let candidate = parse_fence(line.content.trim_start_matches([' ', '\t']));
+        if let Some(current) = active_fence {
+            fixed.push_str(line.content);
+            fixed.push_str(line.ending);
+            if candidate
+                .is_some_and(|fence| fence.marker == current.marker && fence.width >= current.width)
+            {
+                active_fence = None;
+            }
+            continue;
+        }
+
+        if let Some(opening) = candidate {
+            active_fence = Some(opening);
+            fixed.push_str(line.content);
+            fixed.push_str(line.ending);
+            continue;
+        }
+
+        fixed.push_str(&fix_full_width_numbers(
+            line.content,
+            line.start,
+            inline_code_ranges,
+        ));
+        fixed.push_str(line.ending);
+    }
+
+    fixed
 }
 
 fn fix_full_width_numbers(
@@ -782,10 +934,10 @@ mod tests {
     }
 
     #[test]
-    fn fixes_blockquote_spacing_and_removes_empty_blockquote() {
-        let input = ">   text\n>missing\n>\n";
+    fn fixes_separate_blockquote_nodes() {
+        let input = ">   text\n\n>missing\n\n>\n";
         let result = lint_markdown(input);
-        assert_eq!(result.fixed, "> text\n> missing\n");
+        assert_eq!(result.fixed, "> text\n\n> missing\n");
         assert_eq!(
             result
                 .diagnostics
@@ -798,6 +950,61 @@ mod tests {
             .diagnostics
             .iter()
             .any(|item| item.rule_id == RULE_NO_EMPTY_BLOCKQUOTE && item.fixable));
+    }
+
+    #[test]
+    fn treats_contiguous_crlf_lines_as_one_blockquote_node() {
+        let input = ">missing\r\n>   text\r\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "> missing\r\n>   text\r\n");
+        let diagnostics = result
+            .diagnostics
+            .iter()
+            .filter(|item| item.rule_id == RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE)
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!((diagnostics[0].line, diagnostics[0].column), (1, 1));
+    }
+
+    #[test]
+    fn fixes_blockquote_nested_in_list_by_node_position() {
+        let input = "- >missing\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "- > missing\n");
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|item| item.rule_id == RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE)
+            .expect("list-contained blockquote is diagnosed");
+        assert_eq!((diagnostic.line, diagnostic.column), (1, 3));
+    }
+
+    #[test]
+    fn fixes_nested_blockquote_marker_once() {
+        let input = ">> text\n";
+        let result = lint_markdown(input);
+        assert_eq!(result.fixed, "> > text\n");
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|item| item.rule_id == RULE_NO_MULTIPLE_SPACE_BLOCKQUOTE)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn removes_empty_blockquote_by_mdast_range() {
+        let result = lint_markdown(">\n");
+        assert_eq!(result.fixed, "");
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|item| item.rule_id == RULE_NO_EMPTY_BLOCKQUOTE)
+            .expect("empty blockquote is diagnosed");
+        assert_eq!((diagnostic.line, diagnostic.column), (1, 1));
+        assert!(diagnostic.fixable);
     }
 
     #[test]
@@ -869,6 +1076,14 @@ mod tests {
         assert!(full_width_inline_code_ranges("Inline `code` only.\n").is_empty());
         assert!(full_width_inline_code_ranges("版本１２ only.\n").is_empty());
         assert_eq!(full_width_inline_code_ranges("`１２`\n").len(), 1);
+    }
+
+    #[test]
+    fn prefilters_correct_blockquotes_without_parsing() {
+        assert!(!may_contain_problematic_blockquote("> quoted text\n"));
+        assert!(may_contain_problematic_blockquote(">missing\n"));
+        assert!(may_contain_problematic_blockquote(">   text\n"));
+        assert!(may_contain_problematic_blockquote("- >missing\n"));
     }
 
     #[test]
